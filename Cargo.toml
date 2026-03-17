@@ -1,6 +1,6 @@
 [package]
 name = "codcel-parquet-engine"
-version = "0.1.2"
+version = "0.1.4"
 edition = "2021"
 authors = ["Codcel <support@codcel.com>"]
 description = "Parquet table implementation for Codcel, providing Excel-like lookup and filter operations on Parquet files."
@@ -13,8 +13,8 @@ keywords = ["excel", "finance", "codcel", "spreadsheet", "functions"]
 categories = ["mathematics", "finance"]
 
 [dependencies]
-codcel-calculation-engine = { git = "https://github.com/codcel-io/codcel-calculation-engine.git", tag = "release-0.1.3" }
-codcel-table-engine = { git = "https://github.com/codcel-io/codcel-table-engine.git", tag = "release-0.1.3" }
+codcel-calculation-engine = { git = "https://github.com/codcel-io/codcel-calculation-engine.git", tag = "release-0.1.4" }
+codcel-table-engine = { git = "https://github.com/codcel-io/codcel-table-engine.git", tag = "release-0.1.4" }
 async-trait = "0.1.89"
 datafusion = "52.3.0"
 tokio = { version = "1.50.0", features = ["sync", "time", "rt", "rt-multi-thread"] }
