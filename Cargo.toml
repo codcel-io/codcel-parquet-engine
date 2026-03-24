@@ -13,8 +13,8 @@ keywords = ["excel", "finance", "codcel", "spreadsheet", "functions"]
 categories = ["mathematics", "finance"]
 
 [dependencies]
-codcel-calculation-engine = { git = "https://github.com/codcel-io/codcel-calculation-engine.git", tag = "release-0.1.5" }
-codcel-table-engine = { git = "https://github.com/codcel-io/codcel-table-engine.git", tag = "release-0.1.5" }
+codcel-calculation-engine = { git = "https://github.com/codcel-io/codcel-calculation-engine.git", branch = "processor-libm-f64" }
+codcel-table-engine = { git = "https://github.com/codcel-io/codcel-table-engine.git", branch = "processor-libm-f64" }
 async-trait = "0.1.89"
 datafusion = "52.3.0"
 tokio = { version = "1.50.0", features = ["sync", "time", "rt", "rt-multi-thread"] }
