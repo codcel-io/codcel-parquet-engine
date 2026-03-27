@@ -1412,14 +1412,24 @@ impl CodcelTable for ParquetTable {
 
         // Aggregate query: returns a single scalar value
         if let Some(ref agg) = modifiers.aggregate {
-            let agg_col = if matches!(agg, SqlAggregate::Count) {
-                "*".to_string()
+            let select_expr = if matches!(agg, SqlAggregate::Count | SqlAggregate::CountA) {
+                "COUNT(*)".to_string()
             } else {
-                col_list[0].clone()
+                // Filter to numeric columns only, matching Excel behavior of ignoring text
+                let numeric_cols: Vec<String> = col_list.iter()
+                    .filter(|col| abstract_column_types.get(*col).map_or(false, |ct| ct.is_numeric()))
+                    .cloned()
+                    .collect();
+                if numeric_cols.is_empty() {
+                    // Fallback: use first column (preserves existing behavior)
+                    format!("{}({})", agg.sql_function(), col_list[0])
+                } else {
+                    agg.build_aggregate_select(&numeric_cols)
+                }
             };
             let sql_query = format!(
-                "SELECT {}({}) FROM {} WHERE {}",
-                agg.sql_function(), agg_col, &self.name, where_condition
+                "SELECT {} FROM {} WHERE {}",
+                select_expr, &self.name, where_condition
             );
             let batches = self.sql_query_name_area_responses(&self.name, &self.filename, &sql_query).await?;
             // Aggregate returns a single row with single column
@@ -1459,14 +1469,23 @@ impl CodcelTable for ParquetTable {
 
         // Aggregate query
         if let Some(ref agg) = modifiers.aggregate {
-            let agg_col = if matches!(agg, SqlAggregate::Count) {
-                "*".to_string()
+            let select_expr = if matches!(agg, SqlAggregate::Count | SqlAggregate::CountA) {
+                "COUNT(*)".to_string()
             } else {
-                col_list[0].clone()
+                let abstract_column_types = self.get_abstract_column_types();
+                let numeric_cols: Vec<String> = col_list.iter()
+                    .filter(|col| abstract_column_types.get(*col).map_or(false, |ct| ct.is_numeric()))
+                    .cloned()
+                    .collect();
+                if numeric_cols.is_empty() {
+                    format!("{}({})", agg.sql_function(), col_list[0])
+                } else {
+                    agg.build_aggregate_select(&numeric_cols)
+                }
             };
             let sql_query = format!(
-                "SELECT {}({}) FROM {}",
-                agg.sql_function(), agg_col, &self.name
+                "SELECT {} FROM {}",
+                select_expr, &self.name
             );
             let batches = self.sql_query_name_area_responses(&self.name, &self.filename, &sql_query).await?;
             if let Some(first_row) = batches.first() {
