@@ -23,7 +23,7 @@ use codcel_table_engine::sql_modifiers::{SqlAggregate, SqlModifiers};
 use codcel_table_engine::searchable::{find_exact_position, find_largest_position, find_smallest_position, Searchable};
 use codcel_table_engine::table_constants::{X_MATCH_MODE_EXACT, X_MATCH_MODE_EXACT_NEXT_SMALLEST, X_MATCH_MODE_EXACT_NEXT_LARGEST, X_MATCH_MODE_WILDCARD, X_SEARCH_MODE_FIRST, X_SEARCH_MODE_REVERSE, X_SEARCH_MODE_BINARY_FIRST, X_SEARCH_MODE_BINARY_LAST};
 use codcel_table_engine::table_functions::TableFunctions;
-use datafusion::arrow::array::{Array, BooleanArray, Float64Array, Int32Array, StringArray, StringViewArray, UInt32Array};
+use datafusion::arrow::array::{Array, BooleanArray, Float64Array, Int32Array, Int64Array, StringArray, StringViewArray, UInt32Array, UInt64Array};
 use datafusion::arrow::record_batch::RecordBatch;
 use once_cell::sync::Lazy;
 use regex::Regex;
@@ -126,6 +126,10 @@ fn extract_value_at_index(column: &dyn Array, index: usize) -> Option<Value> {
         Some(Value::I32(array.value(index)))
     } else if let Some(array) = column.as_any().downcast_ref::<Float64Array>() {
         Some(Value::F64(array.value(index)))
+    } else if let Some(array) = column.as_any().downcast_ref::<Int64Array>() {
+        Some(Value::F64(array.value(index) as f64))
+    } else if let Some(array) = column.as_any().downcast_ref::<UInt64Array>() {
+        Some(Value::F64(array.value(index) as f64))
     } else { column.as_any().downcast_ref::<UInt32Array>().map(|array| Value::I32(array.value(index) as i32)) }
 }
 
@@ -177,6 +181,22 @@ fn push_all_values(column: &dyn Array, values: &mut Vec<Value>) {
         } else {
             for value in array.iter().flatten() {
                 values.push(Value::I32(value as i32));
+            }
+        }
+    } else if let Some(array) = column.as_any().downcast_ref::<Int64Array>() {
+        if array.null_count() == 0 {
+            values.extend(array.values().iter().map(|&v| Value::F64(v as f64)));
+        } else {
+            for value in array.iter().flatten() {
+                values.push(Value::F64(value as f64));
+            }
+        }
+    } else if let Some(array) = column.as_any().downcast_ref::<UInt64Array>() {
+        if array.null_count() == 0 {
+            values.extend(array.values().iter().map(|&v| Value::F64(v as f64)));
+        } else {
+            for value in array.iter().flatten() {
+                values.push(Value::F64(value as f64));
             }
         }
     }
@@ -244,6 +264,30 @@ fn push_values_transposed(column: &dyn Array, values_transposed: &mut RowColumnV
             for (row_index, value) in array.iter().enumerate() {
                 if let Some(v) = value {
                     values_transposed[row_index].push(Value::I32(v as i32));
+                }
+            }
+        }
+    } else if let Some(array) = column.as_any().downcast_ref::<Int64Array>() {
+        if array.null_count() == 0 {
+            for (row_index, &v) in array.values().iter().enumerate() {
+                values_transposed[row_index].push(Value::F64(v as f64));
+            }
+        } else {
+            for (row_index, value) in array.iter().enumerate() {
+                if let Some(v) = value {
+                    values_transposed[row_index].push(Value::F64(v as f64));
+                }
+            }
+        }
+    } else if let Some(array) = column.as_any().downcast_ref::<UInt64Array>() {
+        if array.null_count() == 0 {
+            for (row_index, &v) in array.values().iter().enumerate() {
+                values_transposed[row_index].push(Value::F64(v as f64));
+            }
+        } else {
+            for (row_index, value) in array.iter().enumerate() {
+                if let Some(v) = value {
+                    values_transposed[row_index].push(Value::F64(v as f64));
                 }
             }
         }
