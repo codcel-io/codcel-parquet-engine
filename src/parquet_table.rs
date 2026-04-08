@@ -1461,7 +1461,7 @@ impl CodcelTable for ParquetTable {
             } else {
                 // Filter to numeric columns only, matching Excel behavior of ignoring text
                 let numeric_cols: Vec<String> = col_list.iter()
-                    .filter(|col| abstract_column_types.get(*col).map_or(false, |ct| ct.is_numeric()))
+                    .filter(|col| abstract_column_types.get(*col).is_some_and(|ct| ct.is_numeric()))
                     .cloned()
                     .collect();
                 if numeric_cols.is_empty() {
@@ -1518,7 +1518,7 @@ impl CodcelTable for ParquetTable {
             } else {
                 let abstract_column_types = self.get_abstract_column_types();
                 let numeric_cols: Vec<String> = col_list.iter()
-                    .filter(|col| abstract_column_types.get(*col).map_or(false, |ct| ct.is_numeric()))
+                    .filter(|col| abstract_column_types.get(*col).is_some_and(|ct| ct.is_numeric()))
                     .cloned()
                     .collect();
                 if numeric_cols.is_empty() {

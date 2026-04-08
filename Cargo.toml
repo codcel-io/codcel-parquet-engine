@@ -1,6 +1,6 @@
 [package]
 name = "codcel-parquet-engine"
-version = "0.1.5"
+version = "0.1.7"
 edition = "2021"
 authors = ["Codcel <support@codcel.com>"]
 description = "Parquet table implementation for Codcel, providing Excel-like lookup and filter operations on Parquet files."
