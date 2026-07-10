@@ -696,46 +696,46 @@ impl ParquetTable {
         let sql_query = match match_mode {
             X_MATCH_MODE_EXACT => match search_mode {
                 X_SEARCH_MODE_FIRST => {
-                    format!("SELECT {columns} FROM {} WHERE {search_column} = {lookup_value} LIMIT 1", &self.name)
+                    format!("SELECT {columns} FROM {} WHERE {search_column} = {lookup_value} LIMIT 1", self.name)
                 }
                 X_SEARCH_MODE_REVERSE => {
-                    format!("SELECT {columns} FROM {} WHERE {search_column} = (SELECT MAX(c1) FROM {} WHERE {search_column} = {lookup_value}) LIMIT 1;", &self.name, &self.name)
+                    format!("SELECT {columns} FROM {} WHERE {search_column} = (SELECT MAX(c1) FROM {} WHERE {search_column} = {lookup_value}) LIMIT 1;", self.name, self.name)
                 }
                 X_SEARCH_MODE_BINARY_FIRST => {
-                    format!("SELECT {columns} FROM {} WHERE {search_column} = {lookup_value} ORDER BY {search_column} ASC LIMIT 1", &self.name)
+                    format!("SELECT {columns} FROM {} WHERE {search_column} = {lookup_value} ORDER BY {search_column} ASC LIMIT 1", self.name)
                 }
                 X_SEARCH_MODE_BINARY_LAST => {
-                    format!("SELECT {columns} FROM {} WHERE {search_column} = {lookup_value} ORDER BY {search_column} DESC LIMIT 1", &self.name)
+                    format!("SELECT {columns} FROM {} WHERE {search_column} = {lookup_value} ORDER BY {search_column} DESC LIMIT 1", self.name)
                 }
                 _ => { "".to_string() }
             },
             X_MATCH_MODE_EXACT_NEXT_LARGEST => match search_mode {
                 X_SEARCH_MODE_FIRST => {
-                    format!("SELECT {columns} FROM {} WHERE {search_column} >= {lookup_value} LIMIT 1", &self.name)
+                    format!("SELECT {columns} FROM {} WHERE {search_column} >= {lookup_value} LIMIT 1", self.name)
                 }
                 X_SEARCH_MODE_REVERSE => {
-                    format!("SELECT {columns} FROM {} WHERE {search_column} = (SELECT MIN(c1) FROM {} WHERE {search_column} >= {lookup_value}) LIMIT 1;", &self.name, &self.name)
+                    format!("SELECT {columns} FROM {} WHERE {search_column} = (SELECT MIN(c1) FROM {} WHERE {search_column} >= {lookup_value}) LIMIT 1;", self.name, self.name)
                 }
                 X_SEARCH_MODE_BINARY_FIRST => {
-                    format!("SELECT {columns} FROM {} WHERE {search_column} >= {lookup_value} ORDER BY {search_column} ASC LIMIT 1", &self.name)
+                    format!("SELECT {columns} FROM {} WHERE {search_column} >= {lookup_value} ORDER BY {search_column} ASC LIMIT 1", self.name)
                 }
                 X_SEARCH_MODE_BINARY_LAST => {
-                    format!("SELECT {columns} FROM {} WHERE {search_column} >= {lookup_value} ORDER BY {search_column} DESC LIMIT 1", &self.name)
+                    format!("SELECT {columns} FROM {} WHERE {search_column} >= {lookup_value} ORDER BY {search_column} DESC LIMIT 1", self.name)
                 }
                 _ => { "".to_string() }
             },
             X_MATCH_MODE_EXACT_NEXT_SMALLEST => match search_mode {
                 X_SEARCH_MODE_FIRST => {
-                    format!("SELECT {columns} FROM {} WHERE {search_column} = (SELECT MAX({search_column}) FROM {} WHERE {search_column} <= {lookup_value}) LIMIT 1;", &self.name, &self.name)
+                    format!("SELECT {columns} FROM {} WHERE {search_column} = (SELECT MAX({search_column}) FROM {} WHERE {search_column} <= {lookup_value}) LIMIT 1;", self.name, self.name)
                 }
                 X_SEARCH_MODE_REVERSE => {
-                    format!("SELECT {columns} FROM {} WHERE {search_column} = (SELECT MAX({search_column}) FROM {} WHERE {search_column} <= {lookup_value}) LIMIT 1;", &self.name, &self.name)
+                    format!("SELECT {columns} FROM {} WHERE {search_column} = (SELECT MAX({search_column}) FROM {} WHERE {search_column} <= {lookup_value}) LIMIT 1;", self.name, self.name)
                 }
                 X_SEARCH_MODE_BINARY_FIRST => {
-                    format!("SELECT {columns} FROM {} WHERE {search_column} = (SELECT MAX({search_column}) FROM {} WHERE {search_column} <= {lookup_value}) ORDER BY {search_column} ASC LIMIT 1", &self.name, &self.name)
+                    format!("SELECT {columns} FROM {} WHERE {search_column} = (SELECT MAX({search_column}) FROM {} WHERE {search_column} <= {lookup_value}) ORDER BY {search_column} ASC LIMIT 1", self.name, self.name)
                 }
                 X_SEARCH_MODE_BINARY_LAST => {
-                    format!("SELECT {columns} FROM {} WHERE {search_column} <= {lookup_value} ORDER BY {search_column} DESC LIMIT 1", &self.name)
+                    format!("SELECT {columns} FROM {} WHERE {search_column} <= {lookup_value} ORDER BY {search_column} DESC LIMIT 1", self.name)
                 }
                 _ => { "".to_string() }
             },
@@ -943,9 +943,9 @@ impl CodcelTable for ParquetTable {
 
         let (lookup_value, lookup_value_column) = self.search_value_column(lookup_value, true, &value_format.decimal_separator, "c1")?;
         let sql_query = if range_lookup {
-            format!("SELECT {result_column_index} FROM {} WHERE {lookup_value_column} <= {lookup_value} ORDER BY {search_column_index} DESC LIMIT 1", &self.name)
+            format!("SELECT {result_column_index} FROM {} WHERE {lookup_value_column} <= {lookup_value} ORDER BY {search_column_index} DESC LIMIT 1", self.name)
         } else {
-            format!("SELECT {result_column_index} FROM {} WHERE {lookup_value_column} = {lookup_value} LIMIT 1", &self.name)
+            format!("SELECT {result_column_index} FROM {} WHERE {lookup_value_column} = {lookup_value} LIMIT 1", self.name)
         };
 
         let value_result = self.sql_query_response(&sql_query).await;
@@ -957,7 +957,7 @@ impl CodcelTable for ParquetTable {
         // TODO: PERHAPS DO NOT RAISE AN ERROR????
         // TODO, PERHAPS RAISE AN ERROR HERE
         //    Ok("".to_string())
-        Err(format!("VLOOKUP: Search value {lookup_value} does not exist at column {:} for table {}", &result_column_index, &self.name).into())
+        Err(format!("VLOOKUP: Search value {lookup_value} does not exist at column {:} for table {}", result_column_index, self.name).into())
     }
 
     /// Finds the position of a value in a column or row (MATCH function).
@@ -998,13 +998,13 @@ impl CodcelTable for ParquetTable {
             // VERTICAL COLUMN SEARCH
             let sql_query = match match_type {
                 -1 => {
-                    format!("SELECT c0 FROM {} WHERE {match_column_value} >= {match_value} ORDER BY {column} ASC, c0 ASC LIMIT 1", &self.name)
+                    format!("SELECT c0 FROM {} WHERE {match_column_value} >= {match_value} ORDER BY {column} ASC, c0 ASC LIMIT 1", self.name)
                 }
                 0 => {
-                    format!("SELECT c0 FROM {} WHERE {match_column_value} = {match_value} LIMIT 1", &self.name)
+                    format!("SELECT c0 FROM {} WHERE {match_column_value} = {match_value} LIMIT 1", self.name)
                 }
                 1 => {
-                    format!("SELECT c0 FROM {} WHERE {match_column_value} <= {match_value} ORDER BY {column} DESC, c0 DESC LIMIT 1", &self.name)
+                    format!("SELECT c0 FROM {} WHERE {match_column_value} <= {match_value} ORDER BY {column} DESC, c0 DESC LIMIT 1", self.name)
                 }
                 _ => {
                     return Err(format!("MATCH: The match_type must be -1, 0 or 1.  {match_type:} is not permitted").into());
@@ -1018,7 +1018,7 @@ impl CodcelTable for ParquetTable {
             // HORIZONTAL ROW SEARCH
             // row is a u32, so it's safe to use directly in the query
             let match_value = search_value_pure(match_value, true, &value_format.decimal_separator);
-            let sql_query = format!("SELECT {column} FROM {} WHERE c0 = {:} LIMIT 1", &self.name, row);
+            let sql_query = format!("SELECT {column} FROM {} WHERE c0 = {:} LIMIT 1", self.name, row);
             let value_result = self.sql_query_responses(&sql_query).await?;
             if let Ok(Some(result)) = process_horizontal_match_results(&match_value, match_type, None, value_result) {
                 return Ok(result);
@@ -1028,7 +1028,7 @@ impl CodcelTable for ParquetTable {
         // TODO: PERHAPS DO NOT RAISE AN ERROR????
         // TODO, PERHAPS RAISE AN ERROR HERE
         //    Ok("".to_string())
-        Err(format!("MATCH: Search value {match_value} does not exist for table {} and match type {:}", &self.name, &match_type).into())
+        Err(format!("MATCH: Search value {match_value} does not exist for table {} and match type {:}", self.name, match_type).into())
     }
 
     /// Retrieves a value at a specific row and column position (INDEX function).
@@ -1063,7 +1063,7 @@ impl CodcelTable for ParquetTable {
         };
 
         if row == 0 && column == 0 {
-            let sql_query = format!("SELECT {} FROM {}", self.generate_column_string(), &self.name);
+            let sql_query = format!("SELECT {} FROM {}", self.generate_column_string(), self.name);
 
             let value_result = self.sql_query_area_responses(&sql_query).await;
 
@@ -1072,9 +1072,9 @@ impl CodcelTable for ParquetTable {
             }
         } else if row == 0 {
             let sql_query = if column != -1 {
-                format!("SELECT c{:} FROM {}", column, &self.name)
+                format!("SELECT c{:} FROM {}", column, self.name)
             } else {
-                format!("SELECT {} FROM {}", self.generate_column_string(), &self.name)
+                format!("SELECT {} FROM {}", self.generate_column_string(), self.name)
             };
 
             let value_result = self.sql_query_responses(&sql_query).await;
@@ -1084,7 +1084,7 @@ impl CodcelTable for ParquetTable {
             }
         } else if column != -1 {
             if column == 0 {
-                let sql_query = format!("SELECT {} FROM {} WHERE c0 = {:} LIMIT 1", self.generate_column_string(), &self.name, row);
+                let sql_query = format!("SELECT {} FROM {} WHERE c0 = {:} LIMIT 1", self.generate_column_string(), self.name, row);
 
                 let value_result = self.sql_query_responses(&sql_query).await;
 
@@ -1092,7 +1092,7 @@ impl CodcelTable for ParquetTable {
                     return Ok(result);
                 }
             } else {
-                let sql_query = format!("SELECT c{:} FROM {} WHERE c0 = {:} LIMIT 1", column, &self.name, row);
+                let sql_query = format!("SELECT c{:} FROM {} WHERE c0 = {:} LIMIT 1", column, self.name, row);
 
                 let value_result = self.sql_query_response(&sql_query).await;
 
@@ -1103,7 +1103,7 @@ impl CodcelTable for ParquetTable {
         } else {
             let number_rows = self.count_rows();
             if number_rows > 1 {
-                let sql_query = format!("SELECT {} FROM {} WHERE c0 = {:} LIMIT 1", self.generate_column_string(), &self.name, row);
+                let sql_query = format!("SELECT {} FROM {} WHERE c0 = {:} LIMIT 1", self.generate_column_string(), self.name, row);
 
                 let value_result = self.sql_query_responses(&sql_query).await;
 
@@ -1111,7 +1111,7 @@ impl CodcelTable for ParquetTable {
                     return Ok(result);
                 }
             } else {
-                let sql_query = format!("SELECT c{:} FROM {} LIMIT 1", row, &self.name);
+                let sql_query = format!("SELECT c{:} FROM {} LIMIT 1", row, self.name);
 
                 let value_result = self.sql_query_response(&sql_query).await;
 
@@ -1130,7 +1130,7 @@ impl CodcelTable for ParquetTable {
         } else {
             "none".to_string()
         };
-        Err(format!("Index: Row {:} and column {:} position does not exist for table {}", row, col, &self.name).into())
+        Err(format!("Index: Row {:} and column {:} position does not exist for table {}", row, col, self.name).into())
     }
 
     /// Performs a horizontal lookup (HLOOKUP) on the table.
@@ -1180,7 +1180,7 @@ impl CodcelTable for ParquetTable {
         // TODO: PERHAPS DO NOT RAISE AN ERROR????
         // TODO, PERHAPS RAISE AN ERROR HERE
         //    Ok("".to_string())
-        Err(format!("HLOOKUP: Search value {lookup_value} does not exist at row {:} for table {}", &row_index, &self.name).into())
+        Err(format!("HLOOKUP: Search value {lookup_value} does not exist at row {:} for table {}", row_index, self.name).into())
     }
 
     /// Performs an advanced lookup (XLOOKUP) with flexible match and search modes.
@@ -1247,14 +1247,14 @@ impl CodcelTable for ParquetTable {
             // row is a u32, so it's safe to use directly in the query
             let match_mode = match_mode.unwrap_or_default();
             let match_value = search_value_pure(lookup_value, true, &value_format.decimal_separator);
-            let sql_query = format!("SELECT {search_column} FROM {} WHERE c0 = {:} LIMIT 1", &self.name, row);
+            let sql_query = format!("SELECT {search_column} FROM {} WHERE c0 = {:} LIMIT 1", self.name, row);
             let value_result = self.sql_query_responses(&sql_query).await?;
             if let Ok(Some(result)) = process_horizontal_match_results(&match_value, match_mode, search_mode, value_result) {
                 // result.i32() returns a validated integer, safe to use in query
                 let col_index = result.i32(value_format)?;
                 let col_name = format!("c{}", col_index);
                 validate_sql_identifier(&col_name)?;
-                let sql_query = format!("SELECT {} FROM {} WHERE c0 <> {:}", col_name, &self.name, row);
+                let sql_query = format!("SELECT {} FROM {} WHERE c0 <> {:}", col_name, self.name, row);
                 let value_result = self.sql_query_responses(&sql_query).await;
                 if let Some(result) = process_results(value_result, table_functions, input, value_format).await {
                     return Ok(result);
@@ -1268,7 +1268,7 @@ impl CodcelTable for ParquetTable {
         if let Some(not_found) = if_not_found {
             Ok(Value::String(not_found))
         } else {
-            Err(format!("XSEARCH: Search value {lookup_value} does not exist for table {}", &self.name).into())
+            Err(format!("XSEARCH: Search value {lookup_value} does not exist for table {}", self.name).into())
         }
     }
 
@@ -1349,7 +1349,7 @@ impl CodcelTable for ParquetTable {
             // row is a u32, so it's safe to use directly in the query
             let match_mode = match_mode.unwrap_or_default();
             let match_value = search_value_pure(match_value, true, &value_format.decimal_separator);
-            let sql_query = format!("SELECT {column} FROM {} WHERE c0 = {:} LIMIT 1", &self.name, row);
+            let sql_query = format!("SELECT {column} FROM {} WHERE c0 = {:} LIMIT 1", self.name, row);
             let value_result = self.sql_query_responses(&sql_query).await?;
             if let Ok(Some(result)) = process_horizontal_match_results(&match_value, match_mode, search_mode, value_result) {
                 return Ok(result);
@@ -1359,7 +1359,7 @@ impl CodcelTable for ParquetTable {
         // TODO: PERHAPS DO NOT RAISE AN ERROR????
         // TODO, PERHAPS RAISE AN ERROR HERE
         //    Ok("".to_string())
-        Err(format!("XMATCH: Search value {match_value} does not exist for table {}", &self.name).into())
+        Err(format!("XMATCH: Search value {match_value} does not exist for table {}", self.name).into())
     }
 
     /// Filters rows based on a condition (FILTER function).
@@ -1393,7 +1393,7 @@ impl CodcelTable for ParquetTable {
         // Note: condition.condition() should also perform validation/escaping internally
         let where_condition = condition.condition(abstract_column_types, value_format)?;
 
-        let sql_query = format!("SELECT {columns} FROM {} WHERE {where_condition}", &self.name);
+        let sql_query = format!("SELECT {columns} FROM {} WHERE {where_condition}", self.name);
 
         let value_result = self.sql_query_area_responses(&sql_query).await;
         if let Some(result) = process_area_results(value_result, table_functions, input, value_format).await {
@@ -1430,7 +1430,7 @@ impl CodcelTable for ParquetTable {
         // Validate column identifiers
         validate_column_list(columns)?;
 
-        let sql_query = format!("SELECT {columns} FROM {}", &self.name);
+        let sql_query = format!("SELECT {columns} FROM {}", self.name);
 
         let value_result = self.sql_query_area_responses(&sql_query).await;
         if let Some(result) = process_area_results(value_result, table_functions, input, value_format).await {
@@ -1473,7 +1473,7 @@ impl CodcelTable for ParquetTable {
             };
             let sql_query = format!(
                 "SELECT {} FROM {} WHERE {}",
-                select_expr, &self.name, where_condition
+                select_expr, self.name, where_condition
             );
             let batches = self.sql_query_name_area_responses(&self.name, &self.filename, &sql_query).await?;
             // Aggregate returns a single row with single column
@@ -1488,7 +1488,7 @@ impl CodcelTable for ParquetTable {
         // Non-aggregate query with modifiers
         let sql_query = format!(
             "SELECT {select_prefix}{columns} FROM {} WHERE {where_condition}{order_clause}{limit_clause}",
-            &self.name
+            self.name
         );
 
         let value_result = self.sql_query_area_responses(&sql_query).await;
@@ -1529,7 +1529,7 @@ impl CodcelTable for ParquetTable {
             };
             let sql_query = format!(
                 "SELECT {} FROM {}",
-                select_expr, &self.name
+                select_expr, self.name
             );
             let batches = self.sql_query_name_area_responses(&self.name, &self.filename, &sql_query).await?;
             if let Some(first_row) = batches.first() {
@@ -1542,7 +1542,7 @@ impl CodcelTable for ParquetTable {
 
         let sql_query = format!(
             "SELECT {select_prefix}{columns} FROM {}{order_clause}{limit_clause}",
-            &self.name
+            self.name
         );
 
         let value_result = self.sql_query_area_responses(&sql_query).await;
