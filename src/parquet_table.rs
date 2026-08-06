@@ -204,102 +204,110 @@ fn push_all_values(column: &dyn Array, values: &mut Vec<Value>) {
 
 /// Push values from an Arrow array column into a transposed row structure
 ///
+/// `row_offset` is the index of the row this column's first value belongs to. A query
+/// result may arrive as several `RecordBatch`es (one per file of a sharded table, or one
+/// per output partition of an aggregate), and each batch fills the block of rows that
+/// was reserved for it. Writing from index 0 for every batch would append later batches'
+/// values onto the first batch's rows instead.
+///
 /// For string arrays, this uses direct indexing with null bitmap check to avoid
 /// Option unwrapping overhead when the array has no nulls.
-fn push_values_transposed(column: &dyn Array, values_transposed: &mut RowColumnValues) {
+fn push_values_transposed(column: &dyn Array, values_transposed: &mut RowColumnValues, row_offset: usize) {
+    let rows = &mut values_transposed[row_offset..];
+
     if let Some(array) = column.as_any().downcast_ref::<StringViewArray>() {
         if array.null_count() == 0 {
-            for (row_index, row) in values_transposed.iter_mut().enumerate().take(array.len()) {
+            for (row_index, row) in rows.iter_mut().enumerate().take(array.len()) {
                 row.push(Value::String(String::from(array.value(row_index))));
             }
         } else {
             for (row_index, value) in array.iter().enumerate() {
                 if let Some(v) = value {
-                    values_transposed[row_index].push(Value::String(String::from(v)));
+                    rows[row_index].push(Value::String(String::from(v)));
                 }
             }
         }
     } else if let Some(array) = column.as_any().downcast_ref::<StringArray>() {
         if array.null_count() == 0 {
-            for (row_index, row) in values_transposed.iter_mut().enumerate().take(array.len()) {
+            for (row_index, row) in rows.iter_mut().enumerate().take(array.len()) {
                 row.push(Value::String(String::from(array.value(row_index))));
             }
         } else {
             for (row_index, value) in array.iter().enumerate() {
                 if let Some(v) = value {
-                    values_transposed[row_index].push(Value::String(String::from(v)));
+                    rows[row_index].push(Value::String(String::from(v)));
                 }
             }
         }
     } else if let Some(array) = column.as_any().downcast_ref::<Int32Array>() {
         if array.null_count() == 0 {
             for (row_index, &v) in array.values().iter().enumerate() {
-                values_transposed[row_index].push(Value::I32(v));
+                rows[row_index].push(Value::I32(v));
             }
         } else {
             for (row_index, value) in array.iter().enumerate() {
                 if let Some(v) = value {
-                    values_transposed[row_index].push(Value::I32(v));
+                    rows[row_index].push(Value::I32(v));
                 }
             }
         }
     } else if let Some(array) = column.as_any().downcast_ref::<Float64Array>() {
         if array.null_count() == 0 {
             for (row_index, &v) in array.values().iter().enumerate() {
-                values_transposed[row_index].push(Value::F64(v));
+                rows[row_index].push(Value::F64(v));
             }
         } else {
             for (row_index, value) in array.iter().enumerate() {
                 if let Some(v) = value {
-                    values_transposed[row_index].push(Value::F64(v));
+                    rows[row_index].push(Value::F64(v));
                 }
             }
         }
     } else if let Some(array) = column.as_any().downcast_ref::<UInt32Array>() {
         if array.null_count() == 0 {
             for (row_index, &v) in array.values().iter().enumerate() {
-                values_transposed[row_index].push(Value::I32(v as i32));
+                rows[row_index].push(Value::I32(v as i32));
             }
         } else {
             for (row_index, value) in array.iter().enumerate() {
                 if let Some(v) = value {
-                    values_transposed[row_index].push(Value::I32(v as i32));
+                    rows[row_index].push(Value::I32(v as i32));
                 }
             }
         }
     } else if let Some(array) = column.as_any().downcast_ref::<Int64Array>() {
         if array.null_count() == 0 {
             for (row_index, &v) in array.values().iter().enumerate() {
-                values_transposed[row_index].push(Value::F64(v as f64));
+                rows[row_index].push(Value::F64(v as f64));
             }
         } else {
             for (row_index, value) in array.iter().enumerate() {
                 if let Some(v) = value {
-                    values_transposed[row_index].push(Value::F64(v as f64));
+                    rows[row_index].push(Value::F64(v as f64));
                 }
             }
         }
     } else if let Some(array) = column.as_any().downcast_ref::<UInt64Array>() {
         if array.null_count() == 0 {
             for (row_index, &v) in array.values().iter().enumerate() {
-                values_transposed[row_index].push(Value::F64(v as f64));
+                rows[row_index].push(Value::F64(v as f64));
             }
         } else {
             for (row_index, value) in array.iter().enumerate() {
                 if let Some(v) = value {
-                    values_transposed[row_index].push(Value::F64(v as f64));
+                    rows[row_index].push(Value::F64(v as f64));
                 }
             }
         }
     } else if let Some(array) = column.as_any().downcast_ref::<BooleanArray>() {
         if array.null_count() == 0 {
-            for (row_index, row) in values_transposed.iter_mut().enumerate().take(array.len()) {
+            for (row_index, row) in rows.iter_mut().enumerate().take(array.len()) {
                 row.push(Value::Bool(array.value(row_index)));
             }
         } else {
             for (row_index, value) in array.iter().enumerate() {
                 if let Some(v) = value {
-                    values_transposed[row_index].push(Value::Bool(v));
+                    rows[row_index].push(Value::Bool(v));
                 }
             }
         }
@@ -585,17 +593,13 @@ impl ParquetTable {
                 let column_count = batch.num_columns();
                 let row_count = batch.num_rows();
 
-                // Ensure values_transposed can hold additional rows
-                if values_transposed.is_empty() {
-                    values_transposed = vec![Vec::with_capacity(column_count); row_count];
-                } else {
-                    for _ in 0..row_count {
-                        values_transposed.push(Vec::with_capacity(column_count));
-                    }
-                }
+                // Each batch fills its own block of rows, appended after the rows already
+                // written by earlier batches.
+                let row_offset = values_transposed.len();
+                values_transposed.resize_with(row_offset + row_count, || Vec::with_capacity(column_count));
 
                 for column in batch.columns().iter() {
-                    push_values_transposed(column.as_ref(), &mut values_transposed);
+                    push_values_transposed(column.as_ref(), &mut values_transposed, row_offset);
                 }
             }
         }
