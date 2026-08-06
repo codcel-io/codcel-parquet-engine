@@ -2,11 +2,11 @@
 name = "codcel-parquet-engine"
 version = "0.1.9"
 edition = "2021"
-authors = ["Codcel <support@codcel.com>"]
+authors = ["Codcel <support@codcel.io>"]
 description = "Parquet table implementation for Codcel, providing Excel-like lookup and filter operations on Parquet files."
 documentation = "https://codcel.io"
 readme = "README.md"
-license-file = "LICENSES/LICENSING.md"
+license = "MIT OR Apache-2.0"
 repository = "https://github.com/codcel-io/codcel-parquet-engine"
 homepage   = "https://codcel.io"
 keywords = ["excel", "finance", "codcel", "spreadsheet", "functions"]
