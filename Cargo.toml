@@ -2,19 +2,31 @@
 name = "codcel-parquet-engine"
 version = "0.1.9"
 edition = "2021"
+rust-version = "1.89"
 authors = ["Codcel <support@codcel.io>"]
-description = "Parquet table implementation for Codcel, providing Excel-like lookup and filter operations on Parquet files."
-documentation = "https://codcel.io"
+description = "Excel lookups and filters implemented in Rust over Apache Parquet, powered by DataFusion — read-only, with SQL pushdown, query caching and request coalescing. Part of Codcel (codcel.io): Excel in, real code out."
 readme = "README.md"
 license = "MIT OR Apache-2.0"
 repository = "https://github.com/codcel-io/codcel-parquet-engine"
-homepage   = "https://codcel.io"
-keywords = ["excel", "finance", "codcel", "spreadsheet", "functions"]
-categories = ["mathematics", "finance"]
+homepage = "https://codcel.io"
+keywords = ["excel", "spreadsheet", "parquet", "datafusion", "analytics"]
+categories = ["database-implementations", "database", "caching"]
+include = [
+    "src/**/*.rs",
+    "tests/**/*.rs",
+    "README.md",
+    "CONTRIBUTING.md",
+    "LICENSE-MIT",
+    "LICENSE-APACHE",
+]
+
+[package.metadata.docs.rs]
+all-features = true
+targets = ["x86_64-unknown-linux-gnu"]
 
 [dependencies]
-codcel-calculation-engine = { git = "https://github.com/codcel-io/codcel-calculation-engine.git", branch = "pre-release-0.1.9" }
-codcel-table-engine = { git = "https://github.com/codcel-io/codcel-table-engine.git", branch = "pre-release-0.1.9" }
+codcel-calculation-engine = "0.1.9"
+codcel-table-engine = "0.1.9"
 async-trait = "0.1.91"
 datafusion = "54.1.0"
 tokio = { version = "1.53.1", features = ["sync", "time", "rt", "rt-multi-thread"] }

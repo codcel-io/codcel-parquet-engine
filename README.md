@@ -1,8 +1,8 @@
 <p align="center">
   <a href="https://codcel.io">
     <picture>
-      <source media="(prefers-color-scheme: dark)" srcset="assets/codcel-logo-lockup-dark.svg">
-      <img src="assets/codcel-logo-lockup.svg" alt="Codcel" width="320">
+      <source media="(prefers-color-scheme: dark)" srcset="https://raw.githubusercontent.com/codcel-io/codcel-parquet-engine/refs/tags/release-0.1.9/assets/codcel-logo-lockup-dark.svg">
+      <img src="https://raw.githubusercontent.com/codcel-io/codcel-parquet-engine/refs/tags/release-0.1.9/assets/codcel-logo-lockup.svg" alt="Codcel" width="320">
     </picture>
   </a>
 </p>
@@ -34,7 +34,7 @@ Add the crate to your `Cargo.toml`:
 
 ```toml
 [dependencies]
-codcel-parquet-engine = { git = "https://github.com/codcel-io/codcel-parquet-engine.git", branch = "main" }
+codcel-parquet-engine = "0.1.9"
 ```
 
 Initialize a table from a Parquet file:
