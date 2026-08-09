@@ -9,6 +9,7 @@
 
 # Codcel Parquet Engine
 
+[![CI](https://github.com/codcel-io/codcel-parquet-engine/actions/workflows/ci.yml/badge.svg)](https://github.com/codcel-io/codcel-parquet-engine/actions/workflows/ci.yml)
 [![License: MIT OR Apache-2.0](https://img.shields.io/badge/license-MIT%20OR%20Apache--2.0-blue.svg)](#licensing)
 
 Read-only Parquet table engine for Codcel — Excel-like lookups and filtering on columnar data files, with query caching and request coalescing.
