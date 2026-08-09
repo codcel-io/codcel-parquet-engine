@@ -4,36 +4,44 @@
 // This file is part of Codcel (https://codcel.io).
 // See LICENSE-MIT and LICENSE-APACHE in the project root.
 
-use std::sync::OnceLock;
+use crate::sql_cache::SqlCache;
+use async_trait::async_trait;
+use codcel_calculation_engine::input::Input;
+use codcel_calculation_engine::value::Value;
+use codcel_calculation_engine::value_format::ValueFormat;
+use codcel_table_engine::codcel_table::CodcelTable;
+use codcel_table_engine::column_type::ColumnType;
+use codcel_table_engine::condition::Condition;
+use codcel_table_engine::searchable::{
+    find_exact_position, find_largest_position, find_smallest_position, Searchable,
+};
+use codcel_table_engine::sql_modifiers::{SqlAggregate, SqlModifiers};
+use codcel_table_engine::table_constants::{
+    X_MATCH_MODE_EXACT, X_MATCH_MODE_EXACT_NEXT_LARGEST, X_MATCH_MODE_EXACT_NEXT_SMALLEST,
+    X_MATCH_MODE_WILDCARD, X_SEARCH_MODE_BINARY_FIRST, X_SEARCH_MODE_BINARY_LAST,
+    X_SEARCH_MODE_FIRST, X_SEARCH_MODE_REVERSE,
+};
+use codcel_table_engine::table_functions::TableFunctions;
+use datafusion::arrow::array::{
+    Array, BooleanArray, Float64Array, Int32Array, Int64Array, StringArray, StringViewArray,
+    UInt32Array, UInt64Array,
+};
+use datafusion::arrow::record_batch::RecordBatch;
+use datafusion::parquet::basic::LogicalType;
+use datafusion::parquet::file::reader::{FileReader, SerializedFileReader};
+use once_cell::sync::Lazy;
+use regex::Regex;
 use std::collections::HashMap;
 use std::error::Error;
 use std::fs::File;
 use std::path::Path;
 use std::sync::Arc;
-use async_trait::async_trait;
-use codcel_calculation_engine::input::Input;
-use datafusion::parquet::basic::LogicalType;
-use codcel_calculation_engine::value::Value;
-use codcel_calculation_engine::value_format::ValueFormat;
-use datafusion::parquet::file::reader::{FileReader, SerializedFileReader};
-use codcel_table_engine::codcel_table::CodcelTable;
-use codcel_table_engine::column_type::ColumnType;
-use codcel_table_engine::condition::Condition;
-use codcel_table_engine::sql_modifiers::{SqlAggregate, SqlModifiers};
-use codcel_table_engine::searchable::{find_exact_position, find_largest_position, find_smallest_position, Searchable};
-use codcel_table_engine::table_constants::{X_MATCH_MODE_EXACT, X_MATCH_MODE_EXACT_NEXT_SMALLEST, X_MATCH_MODE_EXACT_NEXT_LARGEST, X_MATCH_MODE_WILDCARD, X_SEARCH_MODE_FIRST, X_SEARCH_MODE_REVERSE, X_SEARCH_MODE_BINARY_FIRST, X_SEARCH_MODE_BINARY_LAST};
-use codcel_table_engine::table_functions::TableFunctions;
-use datafusion::arrow::array::{Array, BooleanArray, Float64Array, Int32Array, Int64Array, StringArray, StringViewArray, UInt32Array, UInt64Array};
-use datafusion::arrow::record_batch::RecordBatch;
-use once_cell::sync::Lazy;
-use regex::Regex;
+use std::sync::OnceLock;
 use tokio::sync::RwLock;
-use crate::sql_cache::SqlCache;
 
 /// Regex pattern for valid SQL identifiers: alphanumeric and underscores only, must start with letter or underscore
-static IDENTIFIER_REGEX: Lazy<Regex> = Lazy::new(|| {
-    Regex::new(r"^[a-zA-Z_][a-zA-Z0-9_]*$").expect("Invalid regex pattern")
-});
+static IDENTIFIER_REGEX: Lazy<Regex> =
+    Lazy::new(|| Regex::new(r"^[a-zA-Z_][a-zA-Z0-9_]*$").expect("Invalid regex pattern"));
 
 /// Validates that a string is a safe SQL identifier (column name, table name, etc.)
 /// Returns Ok(()) if valid, Err with message if invalid.
@@ -58,7 +66,7 @@ fn validate_column_list(columns: &str) -> Result<(), Box<dyn Error + Send + Sync
         }
         // Handle expressions like UPPER(column_name)
         if col.starts_with("UPPER(") && col.ends_with(')') {
-            let inner = &col[6..col.len()-1];
+            let inner = &col[6..col.len() - 1];
             validate_sql_identifier(inner)?;
         } else {
             validate_sql_identifier(col)?;
@@ -74,18 +82,28 @@ fn escape_sql_string(value: &str) -> String {
 
 /// Build SQL clause fragments from SqlModifiers for Parquet/DataFusion queries.
 /// Returns (select_prefix, order_clause, limit_clause).
-fn build_parquet_modifier_clauses(modifiers: &SqlModifiers, col_list: &[String]) -> (String, String, String) {
-    let select_prefix = if modifiers.distinct { "DISTINCT ".to_string() } else { String::new() };
+fn build_parquet_modifier_clauses(
+    modifiers: &SqlModifiers,
+    col_list: &[String],
+) -> (String, String, String) {
+    let select_prefix = if modifiers.distinct {
+        "DISTINCT ".to_string()
+    } else {
+        String::new()
+    };
 
     let order_clause = if let Some(ref order) = modifiers.order_by {
-        let parts: Vec<String> = order.iter().map(|&(idx, desc): &(usize, bool)| {
-            let col = if idx > 0 && idx <= col_list.len() {
-                &col_list[idx - 1]
-            } else {
-                &col_list[0]
-            };
-            format!("{} {}", col, if desc { "DESC" } else { "ASC" })
-        }).collect();
+        let parts: Vec<String> = order
+            .iter()
+            .map(|&(idx, desc): &(usize, bool)| {
+                let col = if idx > 0 && idx <= col_list.len() {
+                    &col_list[idx - 1]
+                } else {
+                    &col_list[0]
+                };
+                format!("{} {}", col, if desc { "DESC" } else { "ASC" })
+            })
+            .collect();
         format!(" ORDER BY {}", parts.join(", "))
     } else {
         String::new()
@@ -130,7 +148,12 @@ fn extract_value_at_index(column: &dyn Array, index: usize) -> Option<Value> {
         Some(Value::F64(array.value(index) as f64))
     } else if let Some(array) = column.as_any().downcast_ref::<UInt64Array>() {
         Some(Value::F64(array.value(index) as f64))
-    } else { column.as_any().downcast_ref::<UInt32Array>().map(|array| Value::I32(array.value(index) as i32)) }
+    } else {
+        column
+            .as_any()
+            .downcast_ref::<UInt32Array>()
+            .map(|array| Value::I32(array.value(index) as i32))
+    }
 }
 
 /// Push all values from an Arrow array column into a Vec
@@ -212,7 +235,11 @@ fn push_all_values(column: &dyn Array, values: &mut Vec<Value>) {
 ///
 /// For string arrays, this uses direct indexing with null bitmap check to avoid
 /// Option unwrapping overhead when the array has no nulls.
-fn push_values_transposed(column: &dyn Array, values_transposed: &mut RowColumnValues, row_offset: usize) {
+fn push_values_transposed(
+    column: &dyn Array,
+    values_transposed: &mut RowColumnValues,
+    row_offset: usize,
+) {
     let rows = &mut values_transposed[row_offset..];
 
     if let Some(array) = column.as_any().downcast_ref::<StringViewArray>() {
@@ -319,7 +346,11 @@ fn logical_type_to_column_type(lt: &Option<LogicalType>) -> ColumnType {
     match lt {
         Some(LogicalType::String) => ColumnType::Text,
         Some(LogicalType::Integer { bit_width, .. }) => {
-            if *bit_width <= 32 { ColumnType::Integer } else { ColumnType::BigInt }
+            if *bit_width <= 32 {
+                ColumnType::Integer
+            } else {
+                ColumnType::BigInt
+            }
         }
         Some(LogicalType::Decimal { .. }) => ColumnType::Double,
         Some(LogicalType::Float16) => ColumnType::Float,
@@ -390,7 +421,10 @@ impl ParquetTable {
     /// - The Parquet file cannot be opened or read
     /// - The file is not a valid Parquet format
     /// - File metadata cannot be extracted
-    pub async fn init(filename: String, file_shortname: &str) -> Result<ParquetTable, Box<dyn Error + Send + Sync>> {
+    pub async fn init(
+        filename: String,
+        file_shortname: &str,
+    ) -> Result<ParquetTable, Box<dyn Error + Send + Sync>> {
         let name = file_shortname.replace(".parquet", "");
 
         let column_types: HashMap<String, Option<LogicalType>> = HashMap::new();
@@ -425,7 +459,13 @@ impl ParquetTable {
         })
     }
 
-    fn search_value_column(&self, search_value: &str, to_upper: bool, decimal_separator: &str, search_column: &str) -> Result<(String, String), Box<dyn Error + Send + Sync>> {
+    fn search_value_column(
+        &self,
+        search_value: &str,
+        to_upper: bool,
+        decimal_separator: &str,
+        search_column: &str,
+    ) -> Result<(String, String), Box<dyn Error + Send + Sync>> {
         // Validate the search column identifier
         validate_sql_identifier(search_column)?;
 
@@ -435,7 +475,10 @@ impl ParquetTable {
                     if to_upper {
                         // Escape the string value to prevent SQL injection
                         let escaped_value = escape_sql_string(&search_value.to_uppercase());
-                        Ok((format!("'{}'", escaped_value), format!("UPPER({search_column})")))
+                        Ok((
+                            format!("'{}'", escaped_value),
+                            format!("UPPER({search_column})"),
+                        ))
                     } else {
                         let escaped_value = escape_sql_string(search_value);
                         Ok((format!("'{}'", escaped_value), search_column.to_string()))
@@ -450,7 +493,7 @@ impl ParquetTable {
                     }
                     Ok((search_value_f64, search_column.to_string()))
                 }
-            }
+            };
         };
 
         // If column type is unknown, escape as string to be safe
@@ -461,12 +504,8 @@ impl ParquetTable {
     fn open_file(&self) -> Result<File, Box<dyn Error + Send + Sync>> {
         let filename = &self.filename.replace("_xyz*.parquet", "_xyz0.parquet");
         match File::open(Path::new(filename)) {
-            Ok(file) => {
-                Ok(file)
-            }
-            Err(_) => {
-                Err(format!("Couldn't open table {}", self.name).into())
-            }
+            Ok(file) => Ok(file),
+            Err(_) => Err(format!("Couldn't open table {}", self.name).into()),
         }
     }
 
@@ -480,7 +519,9 @@ impl ParquetTable {
 
         loop {
             // Construct the file path with incremental index
-            let filename = &self.filename.replace("_xyz*.parquet", &format!("_xyz{index:}.parquet"));
+            let filename = &self
+                .filename
+                .replace("_xyz*.parquet", &format!("_xyz{index:}.parquet"));
             let path = Path::new(&filename);
 
             // Check if the file exists
@@ -514,21 +555,37 @@ impl ParquetTable {
 
         self.column_count = fields.len() as i64;
 
-        self.column_types = fields.iter().map(|field| {
-            let basic_info = field.get_basic_info();
-            (basic_info.name().to_string(), basic_info.logical_type_ref().cloned())
-        }).collect::<HashMap<_, _>>();
+        self.column_types = fields
+            .iter()
+            .map(|field| {
+                let basic_info = field.get_basic_info();
+                (
+                    basic_info.name().to_string(),
+                    basic_info.logical_type_ref().cloned(),
+                )
+            })
+            .collect::<HashMap<_, _>>();
 
         Ok(())
     }
 
-    async fn sql_query(&self, name: &str, filename: &str, sql_query: &str) -> Result<Option<Arc<Vec<RecordBatch>>>, Box<dyn Error + Send + Sync>> {
+    async fn sql_query(
+        &self,
+        name: &str,
+        filename: &str,
+        sql_query: &str,
+    ) -> Result<Option<Arc<Vec<RecordBatch>>>, Box<dyn Error + Send + Sync>> {
         // Use read lock - SqlCache uses interior mutability for concurrent access
         let cache = self.sql_cache.read().await;
         cache.sql_query(name, filename, sql_query).await
     }
 
-    async fn sql_query_name_response(&self, name: &str, filename: &str, sql_query: &str) -> Result<Value, Box<dyn Error + Send + Sync>> {
+    async fn sql_query_name_response(
+        &self,
+        name: &str,
+        filename: &str,
+        sql_query: &str,
+    ) -> Result<Value, Box<dyn Error + Send + Sync>> {
         let batches_option = self.sql_query(name, filename, sql_query).await?;
 
         // Extract the value (assuming there is at least one row and one column in the result)
@@ -552,11 +609,12 @@ impl ParquetTable {
         &self,
         name: &str,
         filename: &str,
-        sql_query: &str
+        sql_query: &str,
     ) -> Result<Vec<Value>, Box<dyn Error + Send + Sync>> {
         let batches_option = self.sql_query(name, filename, sql_query).await?;
 
-        let estimated_capacity = batches_option.as_ref()
+        let estimated_capacity = batches_option
+            .as_ref()
             .map(|b| b.iter().map(|batch| batch.num_rows()).sum())
             .unwrap_or(0);
         let mut values: Vec<Value> = Vec::with_capacity(estimated_capacity);
@@ -577,12 +635,11 @@ impl ParquetTable {
         }
     }
 
-
     async fn sql_query_name_area_responses(
         &self,
         name: &str,
         filename: &str,
-        sql_query: &str
+        sql_query: &str,
     ) -> Result<RowColumnValues, Box<dyn Error + Send + Sync>> {
         let batches_option = self.sql_query(name, filename, sql_query).await?;
 
@@ -596,7 +653,8 @@ impl ParquetTable {
                 // Each batch fills its own block of rows, appended after the rows already
                 // written by earlier batches.
                 let row_offset = values_transposed.len();
-                values_transposed.resize_with(row_offset + row_count, || Vec::with_capacity(column_count));
+                values_transposed
+                    .resize_with(row_offset + row_count, || Vec::with_capacity(column_count));
 
                 for column in batch.columns().iter() {
                     push_values_transposed(column.as_ref(), &mut values_transposed, row_offset);
@@ -611,20 +669,36 @@ impl ParquetTable {
         }
     }
 
-
-    async fn sql_query_response(&self, sql_query: &str) -> Result<Value, Box<dyn Error + Send + Sync>> {
-        self.sql_query_name_response(&self.name, &self.filename, sql_query).await
+    async fn sql_query_response(
+        &self,
+        sql_query: &str,
+    ) -> Result<Value, Box<dyn Error + Send + Sync>> {
+        self.sql_query_name_response(&self.name, &self.filename, sql_query)
+            .await
     }
 
-    async fn sql_query_responses(&self, sql_query: &str) -> Result<Vec<Value>, Box<dyn Error + Send + Sync>> {
-        self.sql_query_name_responses(&self.name, &self.filename, sql_query).await
+    async fn sql_query_responses(
+        &self,
+        sql_query: &str,
+    ) -> Result<Vec<Value>, Box<dyn Error + Send + Sync>> {
+        self.sql_query_name_responses(&self.name, &self.filename, sql_query)
+            .await
     }
 
-    async fn sql_query_area_responses(&self, sql_query: &str) -> Result<RowColumnValues, Box<dyn Error + Send + Sync>> {
-        self.sql_query_name_area_responses(&self.name, &self.filename, sql_query).await
+    async fn sql_query_area_responses(
+        &self,
+        sql_query: &str,
+    ) -> Result<RowColumnValues, Box<dyn Error + Send + Sync>> {
+        self.sql_query_name_area_responses(&self.name, &self.filename, sql_query)
+            .await
     }
 
-    async fn run_functions(value: Value, table_functions: &TableFunctions, input: &Input, value_format: &ValueFormat) -> Result<Value, Box<dyn Error + Send + Sync>> {
+    async fn run_functions(
+        value: Value,
+        table_functions: &TableFunctions,
+        input: &Input,
+        value_format: &ValueFormat,
+    ) -> Result<Value, Box<dyn Error + Send + Sync>> {
         if let Ok(val) = value.string(value_format) {
             if let Some(stripped) = val.strip_prefix("*P*") {
                 // Parameterized table function: *P*template_name:const1:const2:...
@@ -632,7 +706,8 @@ impl ParquetTable {
                     let mut parts = stripped.splitn(2, ':');
                     let template_name = parts.next().unwrap();
                     let constants_str = parts.next().unwrap_or("");
-                    let params: Vec<Value> = constants_str.split(':')
+                    let params: Vec<Value> = constants_str
+                        .split(':')
                         .filter(|s| !s.is_empty())
                         .map(|s| {
                             // Try i32 first to preserve integer types (e.g., "1" → I32(1))
@@ -677,7 +752,15 @@ impl ParquetTable {
         result
     }
 
-    fn x_search_query(&self, lookup_value: &str, search_column: &str, columns: &str, match_mode: Option<i32>, search_mode: Option<i32>, value_format: &ValueFormat) -> Result<String, Box<dyn Error + Send + Sync>> {
+    fn x_search_query(
+        &self,
+        lookup_value: &str,
+        search_column: &str,
+        columns: &str,
+        match_mode: Option<i32>,
+        search_mode: Option<i32>,
+        value_format: &ValueFormat,
+    ) -> Result<String, Box<dyn Error + Send + Sync>> {
         // Validate all column identifiers
         validate_column_list(columns)?;
         validate_column_list(search_column)?;
@@ -694,40 +777,49 @@ impl ParquetTable {
             X_SEARCH_MODE_FIRST
         };
 
-        let (lookup_value, search_column) = self.search_value_column(lookup_value, true, &value_format.decimal_separator, search_column)?;
+        let (lookup_value, search_column) = self.search_value_column(
+            lookup_value,
+            true,
+            &value_format.decimal_separator,
+            search_column,
+        )?;
 
         // TODO: This SQL logic needs better testing
         let sql_query = match match_mode {
-            X_MATCH_MODE_EXACT => match search_mode {
-                X_SEARCH_MODE_FIRST => {
-                    format!("SELECT {columns} FROM {} WHERE {search_column} = {lookup_value} LIMIT 1", self.name)
+            X_MATCH_MODE_EXACT => {
+                match search_mode {
+                    X_SEARCH_MODE_FIRST => {
+                        format!("SELECT {columns} FROM {} WHERE {search_column} = {lookup_value} LIMIT 1", self.name)
+                    }
+                    X_SEARCH_MODE_REVERSE => {
+                        format!("SELECT {columns} FROM {} WHERE {search_column} = (SELECT MAX(c1) FROM {} WHERE {search_column} = {lookup_value}) LIMIT 1;", self.name, self.name)
+                    }
+                    X_SEARCH_MODE_BINARY_FIRST => {
+                        format!("SELECT {columns} FROM {} WHERE {search_column} = {lookup_value} ORDER BY {search_column} ASC LIMIT 1", self.name)
+                    }
+                    X_SEARCH_MODE_BINARY_LAST => {
+                        format!("SELECT {columns} FROM {} WHERE {search_column} = {lookup_value} ORDER BY {search_column} DESC LIMIT 1", self.name)
+                    }
+                    _ => "".to_string(),
                 }
-                X_SEARCH_MODE_REVERSE => {
-                    format!("SELECT {columns} FROM {} WHERE {search_column} = (SELECT MAX(c1) FROM {} WHERE {search_column} = {lookup_value}) LIMIT 1;", self.name, self.name)
+            }
+            X_MATCH_MODE_EXACT_NEXT_LARGEST => {
+                match search_mode {
+                    X_SEARCH_MODE_FIRST => {
+                        format!("SELECT {columns} FROM {} WHERE {search_column} >= {lookup_value} LIMIT 1", self.name)
+                    }
+                    X_SEARCH_MODE_REVERSE => {
+                        format!("SELECT {columns} FROM {} WHERE {search_column} = (SELECT MIN(c1) FROM {} WHERE {search_column} >= {lookup_value}) LIMIT 1;", self.name, self.name)
+                    }
+                    X_SEARCH_MODE_BINARY_FIRST => {
+                        format!("SELECT {columns} FROM {} WHERE {search_column} >= {lookup_value} ORDER BY {search_column} ASC LIMIT 1", self.name)
+                    }
+                    X_SEARCH_MODE_BINARY_LAST => {
+                        format!("SELECT {columns} FROM {} WHERE {search_column} >= {lookup_value} ORDER BY {search_column} DESC LIMIT 1", self.name)
+                    }
+                    _ => "".to_string(),
                 }
-                X_SEARCH_MODE_BINARY_FIRST => {
-                    format!("SELECT {columns} FROM {} WHERE {search_column} = {lookup_value} ORDER BY {search_column} ASC LIMIT 1", self.name)
-                }
-                X_SEARCH_MODE_BINARY_LAST => {
-                    format!("SELECT {columns} FROM {} WHERE {search_column} = {lookup_value} ORDER BY {search_column} DESC LIMIT 1", self.name)
-                }
-                _ => { "".to_string() }
-            },
-            X_MATCH_MODE_EXACT_NEXT_LARGEST => match search_mode {
-                X_SEARCH_MODE_FIRST => {
-                    format!("SELECT {columns} FROM {} WHERE {search_column} >= {lookup_value} LIMIT 1", self.name)
-                }
-                X_SEARCH_MODE_REVERSE => {
-                    format!("SELECT {columns} FROM {} WHERE {search_column} = (SELECT MIN(c1) FROM {} WHERE {search_column} >= {lookup_value}) LIMIT 1;", self.name, self.name)
-                }
-                X_SEARCH_MODE_BINARY_FIRST => {
-                    format!("SELECT {columns} FROM {} WHERE {search_column} >= {lookup_value} ORDER BY {search_column} ASC LIMIT 1", self.name)
-                }
-                X_SEARCH_MODE_BINARY_LAST => {
-                    format!("SELECT {columns} FROM {} WHERE {search_column} >= {lookup_value} ORDER BY {search_column} DESC LIMIT 1", self.name)
-                }
-                _ => { "".to_string() }
-            },
+            }
             X_MATCH_MODE_EXACT_NEXT_SMALLEST => match search_mode {
                 X_SEARCH_MODE_FIRST => {
                     format!("SELECT {columns} FROM {} WHERE {search_column} = (SELECT MAX({search_column}) FROM {} WHERE {search_column} <= {lookup_value}) LIMIT 1;", self.name, self.name)
@@ -741,19 +833,18 @@ impl ParquetTable {
                 X_SEARCH_MODE_BINARY_LAST => {
                     format!("SELECT {columns} FROM {} WHERE {search_column} <= {lookup_value} ORDER BY {search_column} DESC LIMIT 1", self.name)
                 }
-                _ => { "".to_string() }
+                _ => "".to_string(),
             },
             X_MATCH_MODE_WILDCARD => "".to_string(), /*match search_mode {
-                // TODO
-                _ => "".to_string()
+            // TODO
+            _ => "".to_string()
             }*/
-            _ => { "".to_string() }
+            _ => "".to_string(),
         };
 
         Ok(sql_query)
     }
 }
-
 
 fn search_value_pure(search_value: &str, to_upper: bool, decimal_separator: &str) -> String {
     let search_value_f64 = search_value.replace(decimal_separator, ".");
@@ -767,13 +858,20 @@ fn search_value_pure(search_value: &str, to_upper: bool, decimal_separator: &str
     }
 }
 
-async fn process_area_results(value_result: Result<RowColumnValues, Box<dyn Error + Send + Sync>>, table_functions: &TableFunctions, input: &Input, value_format: &ValueFormat) -> Option<Value> {
+async fn process_area_results(
+    value_result: Result<RowColumnValues, Box<dyn Error + Send + Sync>>,
+    table_functions: &TableFunctions,
+    input: &Input,
+    value_format: &ValueFormat,
+) -> Option<Value> {
     let mut result: RowColumnValues = vec![];
     if let Ok(vals) = value_result {
         for inside in vals {
             let mut values: Vec<Value> = vec![];
             for val in inside {
-                if let Ok(result) = ParquetTable::run_functions(val, table_functions, input, value_format).await {
+                if let Ok(result) =
+                    ParquetTable::run_functions(val, table_functions, input, value_format).await
+                {
                     values.push(result);
                 }
             }
@@ -788,12 +886,19 @@ async fn process_area_results(value_result: Result<RowColumnValues, Box<dyn Erro
     None
 }
 
-async fn process_results(value_result: Result<Vec<Value>, Box<dyn Error + Send + Sync>>, table_functions: &TableFunctions, input: &Input, value_format: &ValueFormat) -> Option<Value> {
+async fn process_results(
+    value_result: Result<Vec<Value>, Box<dyn Error + Send + Sync>>,
+    table_functions: &TableFunctions,
+    input: &Input,
+    value_format: &ValueFormat,
+) -> Option<Value> {
     let mut values: Vec<Value> = vec![];
 
     if let Ok(vals) = value_result {
         for val in vals {
-            if let Ok(result) = ParquetTable::run_functions(val, table_functions, input, value_format).await {
+            if let Ok(result) =
+                ParquetTable::run_functions(val, table_functions, input, value_format).await
+            {
                 values.push(result);
             }
         }
@@ -806,16 +911,28 @@ async fn process_results(value_result: Result<Vec<Value>, Box<dyn Error + Send +
     None
 }
 
-async fn process_result(value_result: Result<Value, Box<dyn Error + Send + Sync>>, table_functions: &TableFunctions, input: &Input, value_format: &ValueFormat) -> Option<Value> {
+async fn process_result(
+    value_result: Result<Value, Box<dyn Error + Send + Sync>>,
+    table_functions: &TableFunctions,
+    input: &Input,
+    value_format: &ValueFormat,
+) -> Option<Value> {
     if let Ok(value) = value_result {
-        if let Ok(result) = ParquetTable::run_functions(value, table_functions, input, value_format).await {
+        if let Ok(result) =
+            ParquetTable::run_functions(value, table_functions, input, value_format).await
+        {
             return Some(result);
         }
     }
     None
 }
 
-fn process_horizontal_match_position(collection: &mut dyn Searchable, match_value: &str, match_type: i32, search_mode: i32) -> Result<Option<Value>, Box<dyn Error + Send + Sync>> {
+fn process_horizontal_match_position(
+    collection: &mut dyn Searchable,
+    match_value: &str,
+    match_type: i32,
+    search_mode: i32,
+) -> Result<Option<Value>, Box<dyn Error + Send + Sync>> {
     match search_mode {
         -1 => {
             collection.reverse_order();
@@ -830,22 +947,14 @@ fn process_horizontal_match_position(collection: &mut dyn Searchable, match_valu
     }
 
     let pos = match match_type {
-        -1 => {
-            find_smallest_position(collection, match_value)
-        }
-        0 => {
-            find_exact_position(collection, match_value)
-        }
-        1 => {
-            find_largest_position(collection, match_value)
-        }
+        -1 => find_smallest_position(collection, match_value),
+        0 => find_exact_position(collection, match_value),
+        1 => find_largest_position(collection, match_value),
         2 => {
             // TODO Wildcard match to implement for XMATCH
             None
         }
-        _ => {
-            None
-        }
+        _ => None,
     };
 
     if let Some(pos) = pos {
@@ -855,7 +964,12 @@ fn process_horizontal_match_position(collection: &mut dyn Searchable, match_valu
     Err("MATCH: Position not found".into())
 }
 
-fn process_horizontal_match_results(match_value: &str, match_type: i32, search_mode: Option<i32>, values: Vec<Value>) -> Result<Option<Value>, Box<dyn Error + Send + Sync>> {
+fn process_horizontal_match_results(
+    match_value: &str,
+    match_type: i32,
+    search_mode: Option<i32>,
+    values: Vec<Value>,
+) -> Result<Option<Value>, Box<dyn Error + Send + Sync>> {
     let search_mode = search_mode.unwrap_or(1);
 
     // Check the types of all elements in a single pass
@@ -875,35 +989,67 @@ fn process_horizontal_match_results(match_value: &str, match_type: i32, search_m
 
     if all_f64 {
         // If all elements are f64, create Vec<f64>
-        let mut vals: Vec<f64> = values.into_iter().map(|v| match v {
-            Value::F64(value) => value,
-            _ => unreachable!(),
-        }).collect();
-        return process_horizontal_match_position(&mut vals as &mut dyn Searchable, match_value, match_type, search_mode);
+        let mut vals: Vec<f64> = values
+            .into_iter()
+            .map(|v| match v {
+                Value::F64(value) => value,
+                _ => unreachable!(),
+            })
+            .collect();
+        return process_horizontal_match_position(
+            &mut vals as &mut dyn Searchable,
+            match_value,
+            match_type,
+            search_mode,
+        );
     } else if all_i32 {
         // If all elements are i32, create Vec<i32>
-        let mut vals: Vec<i32> = values.into_iter().map(|v| match v {
-            Value::I32(value) => value,
-            _ => unreachable!(),
-        }).collect();
-        return process_horizontal_match_position(&mut vals as &mut dyn Searchable, match_value, match_type, search_mode);
+        let mut vals: Vec<i32> = values
+            .into_iter()
+            .map(|v| match v {
+                Value::I32(value) => value,
+                _ => unreachable!(),
+            })
+            .collect();
+        return process_horizontal_match_position(
+            &mut vals as &mut dyn Searchable,
+            match_value,
+            match_type,
+            search_mode,
+        );
     } else if mixed_f64_i32 {
         // If mixed f64 and i32, create Vec<f64> with all values as f64
-        let mut vals: Vec<f64> = values.into_iter().map(|v| match v {
-            Value::F64(value) => value,
-            Value::I32(value) => value as f64,
-            _ => unreachable!(),
-        }).collect();
-        return process_horizontal_match_position(&mut vals as &mut dyn Searchable, match_value, match_type, search_mode);
+        let mut vals: Vec<f64> = values
+            .into_iter()
+            .map(|v| match v {
+                Value::F64(value) => value,
+                Value::I32(value) => value as f64,
+                _ => unreachable!(),
+            })
+            .collect();
+        return process_horizontal_match_position(
+            &mut vals as &mut dyn Searchable,
+            match_value,
+            match_type,
+            search_mode,
+        );
     } else if contains_string {
         // If it contains any String, create Vec<String> with all values
-        let mut vals: Vec<String> = values.into_iter().map(|v| match v {
-            Value::F64(value) => value.to_string(),
-            Value::I32(value) => value.to_string(),
-            Value::String(value) => value,
-            _ => unreachable!(),
-        }).collect();
-        return process_horizontal_match_position(&mut vals as &mut dyn Searchable, match_value, match_type, search_mode);
+        let mut vals: Vec<String> = values
+            .into_iter()
+            .map(|v| match v {
+                Value::F64(value) => value.to_string(),
+                Value::I32(value) => value.to_string(),
+                Value::String(value) => value,
+                _ => unreachable!(),
+            })
+            .collect();
+        return process_horizontal_match_position(
+            &mut vals as &mut dyn Searchable,
+            match_value,
+            match_type,
+            search_mode,
+        );
     }
 
     Ok(None)
@@ -938,14 +1084,24 @@ impl CodcelTable for ParquetTable {
     /// - Column identifiers are invalid (SQL injection protection)
     /// - The query execution fails
     #[allow(clippy::too_many_arguments)]
-    async fn v_lookup(&self, lookup_value: &str, result_column_index: &str, search_column_index: &str, range: Option<bool>, table_functions: &TableFunctions, input: &Input, value_format: &ValueFormat) -> Result<Value, Box<dyn Error + Send + Sync>> {
+    async fn v_lookup(
+        &self,
+        lookup_value: &str,
+        result_column_index: &str,
+        search_column_index: &str,
+        range: Option<bool>,
+        table_functions: &TableFunctions,
+        input: &Input,
+        value_format: &ValueFormat,
+    ) -> Result<Value, Box<dyn Error + Send + Sync>> {
         // Validate column identifiers - result_column_index may be a comma-separated list
         validate_column_list(result_column_index)?;
         validate_column_list(search_column_index)?;
 
         let range_lookup = range.unwrap_or(true);
 
-        let (lookup_value, lookup_value_column) = self.search_value_column(lookup_value, true, &value_format.decimal_separator, "c1")?;
+        let (lookup_value, lookup_value_column) =
+            self.search_value_column(lookup_value, true, &value_format.decimal_separator, "c1")?;
         let sql_query = if range_lookup {
             format!("SELECT {result_column_index} FROM {} WHERE {lookup_value_column} <= {lookup_value} ORDER BY {search_column_index} DESC LIMIT 1", self.name)
         } else {
@@ -954,14 +1110,20 @@ impl CodcelTable for ParquetTable {
 
         let value_result = self.sql_query_response(&sql_query).await;
 
-        if let Some(result) = process_result(value_result, table_functions, input, value_format).await {
+        if let Some(result) =
+            process_result(value_result, table_functions, input, value_format).await
+        {
             return Ok(result);
         }
 
         // TODO: PERHAPS DO NOT RAISE AN ERROR????
         // TODO, PERHAPS RAISE AN ERROR HERE
         //    Ok("".to_string())
-        Err(format!("VLOOKUP: Search value {lookup_value} does not exist at column {:} for table {}", result_column_index, self.name).into())
+        Err(format!(
+            "VLOOKUP: Search value {lookup_value} does not exist at column {:} for table {}",
+            result_column_index, self.name
+        )
+        .into())
     }
 
     /// Finds the position of a value in a column or row (MATCH function).
@@ -991,27 +1153,45 @@ impl CodcelTable for ParquetTable {
     /// - The value is not found
     /// - Invalid match_type is provided
     /// - Column identifier is invalid
-    async fn match_table(&self, match_value: &str, match_type: Option<i32>, column: &str, row: u32, value_format: &ValueFormat) -> Result<Value, Box<dyn Error + Send + Sync>> {
+    async fn match_table(
+        &self,
+        match_value: &str,
+        match_type: Option<i32>,
+        column: &str,
+        row: u32,
+        value_format: &ValueFormat,
+    ) -> Result<Value, Box<dyn Error + Send + Sync>> {
         // Validate column identifier - may be a comma-separated list
         validate_column_list(column)?;
 
         let match_type = match_type.unwrap_or(1);
 
         if row == 0 {
-            let (match_value, match_column_value) = self.search_value_column(match_value, true, &value_format.decimal_separator, column)?;
+            let (match_value, match_column_value) = self.search_value_column(
+                match_value,
+                true,
+                &value_format.decimal_separator,
+                column,
+            )?;
             // VERTICAL COLUMN SEARCH
             let sql_query = match match_type {
                 -1 => {
                     format!("SELECT c0 FROM {} WHERE {match_column_value} >= {match_value} ORDER BY {column} ASC, c0 ASC LIMIT 1", self.name)
                 }
                 0 => {
-                    format!("SELECT c0 FROM {} WHERE {match_column_value} = {match_value} LIMIT 1", self.name)
+                    format!(
+                        "SELECT c0 FROM {} WHERE {match_column_value} = {match_value} LIMIT 1",
+                        self.name
+                    )
                 }
                 1 => {
                     format!("SELECT c0 FROM {} WHERE {match_column_value} <= {match_value} ORDER BY {column} DESC, c0 DESC LIMIT 1", self.name)
                 }
                 _ => {
-                    return Err(format!("MATCH: The match_type must be -1, 0 or 1.  {match_type:} is not permitted").into());
+                    return Err(format!(
+                        "MATCH: The match_type must be -1, 0 or 1.  {match_type:} is not permitted"
+                    )
+                    .into());
                 }
             };
 
@@ -1022,9 +1202,14 @@ impl CodcelTable for ParquetTable {
             // HORIZONTAL ROW SEARCH
             // row is a u32, so it's safe to use directly in the query
             let match_value = search_value_pure(match_value, true, &value_format.decimal_separator);
-            let sql_query = format!("SELECT {column} FROM {} WHERE c0 = {:} LIMIT 1", self.name, row);
+            let sql_query = format!(
+                "SELECT {column} FROM {} WHERE c0 = {:} LIMIT 1",
+                self.name, row
+            );
             let value_result = self.sql_query_responses(&sql_query).await?;
-            if let Ok(Some(result)) = process_horizontal_match_results(&match_value, match_type, None, value_result) {
+            if let Ok(Some(result)) =
+                process_horizontal_match_results(&match_value, match_type, None, value_result)
+            {
                 return Ok(result);
             }
         }
@@ -1032,7 +1217,11 @@ impl CodcelTable for ParquetTable {
         // TODO: PERHAPS DO NOT RAISE AN ERROR????
         // TODO, PERHAPS RAISE AN ERROR HERE
         //    Ok("".to_string())
-        Err(format!("MATCH: Search value {match_value} does not exist for table {} and match type {:}", self.name, match_type).into())
+        Err(format!(
+            "MATCH: Search value {match_value} does not exist for table {} and match type {:}",
+            self.name, match_type
+        )
+        .into())
     }
 
     /// Retrieves a value at a specific row and column position (INDEX function).
@@ -1058,8 +1247,14 @@ impl CodcelTable for ParquetTable {
     /// # Errors
     ///
     /// Returns an error if the specified row/column position does not exist.
-    async fn index(&self, row: i32, column: Option<i32>, table_functions: &TableFunctions, input: &Input, value_format: &ValueFormat) -> Result<Value, Box<dyn Error + Send + Sync>> {
-
+    async fn index(
+        &self,
+        row: i32,
+        column: Option<i32>,
+        table_functions: &TableFunctions,
+        input: &Input,
+        value_format: &ValueFormat,
+    ) -> Result<Value, Box<dyn Error + Send + Sync>> {
         let column = if let Some(column) = &column {
             *column
         } else {
@@ -1067,51 +1262,82 @@ impl CodcelTable for ParquetTable {
         };
 
         if row == 0 && column == 0 {
-            let sql_query = format!("SELECT {} FROM {}", self.generate_column_string(), self.name);
+            let sql_query = format!(
+                "SELECT {} FROM {}",
+                self.generate_column_string(),
+                self.name
+            );
 
             let value_result = self.sql_query_area_responses(&sql_query).await;
 
-            if let Some(result) = process_area_results(value_result, table_functions, input, value_format).await {
+            if let Some(result) =
+                process_area_results(value_result, table_functions, input, value_format).await
+            {
                 return Ok(result);
             }
         } else if row == 0 {
             let sql_query = if column != -1 {
                 format!("SELECT c{:} FROM {}", column, self.name)
             } else {
-                format!("SELECT {} FROM {}", self.generate_column_string(), self.name)
+                format!(
+                    "SELECT {} FROM {}",
+                    self.generate_column_string(),
+                    self.name
+                )
             };
 
             let value_result = self.sql_query_responses(&sql_query).await;
 
-            if let Some(result) = process_results(value_result, table_functions, input, value_format).await {
+            if let Some(result) =
+                process_results(value_result, table_functions, input, value_format).await
+            {
                 return Ok(result);
             }
         } else if column != -1 {
             if column == 0 {
-                let sql_query = format!("SELECT {} FROM {} WHERE c0 = {:} LIMIT 1", self.generate_column_string(), self.name, row);
+                let sql_query = format!(
+                    "SELECT {} FROM {} WHERE c0 = {:} LIMIT 1",
+                    self.generate_column_string(),
+                    self.name,
+                    row
+                );
 
                 let value_result = self.sql_query_responses(&sql_query).await;
 
-                if let Some(result) = process_results(value_result, table_functions, input, value_format).await {
+                if let Some(result) =
+                    process_results(value_result, table_functions, input, value_format).await
+                {
                     return Ok(result);
                 }
             } else {
-                let sql_query = format!("SELECT c{:} FROM {} WHERE c0 = {:} LIMIT 1", column, self.name, row);
+                let sql_query = format!(
+                    "SELECT c{:} FROM {} WHERE c0 = {:} LIMIT 1",
+                    column, self.name, row
+                );
 
                 let value_result = self.sql_query_response(&sql_query).await;
 
-                if let Some(result) = process_result(value_result, table_functions, input, value_format).await {
+                if let Some(result) =
+                    process_result(value_result, table_functions, input, value_format).await
+                {
                     return Ok(result);
                 }
             }
         } else {
             let number_rows = self.count_rows();
             if number_rows > 1 {
-                let sql_query = format!("SELECT {} FROM {} WHERE c0 = {:} LIMIT 1", self.generate_column_string(), self.name, row);
+                let sql_query = format!(
+                    "SELECT {} FROM {} WHERE c0 = {:} LIMIT 1",
+                    self.generate_column_string(),
+                    self.name,
+                    row
+                );
 
                 let value_result = self.sql_query_responses(&sql_query).await;
 
-                if let Some(result) = process_results(value_result, table_functions, input, value_format).await {
+                if let Some(result) =
+                    process_results(value_result, table_functions, input, value_format).await
+                {
                     return Ok(result);
                 }
             } else {
@@ -1119,12 +1345,13 @@ impl CodcelTable for ParquetTable {
 
                 let value_result = self.sql_query_response(&sql_query).await;
 
-                if let Some(result) = process_result(value_result, table_functions, input, value_format).await {
+                if let Some(result) =
+                    process_result(value_result, table_functions, input, value_format).await
+                {
                     return Ok(result);
                 }
             }
         }
-
 
         // TODO: PERHAPS DO NOT RAISE AN ERROR????
         // TODO, PERHAPS RAISE AN ERROR HERE
@@ -1134,7 +1361,11 @@ impl CodcelTable for ParquetTable {
         } else {
             "none".to_string()
         };
-        Err(format!("Index: Row {:} and column {:} position does not exist for table {}", row, col, self.name).into())
+        Err(format!(
+            "Index: Row {:} and column {:} position does not exist for table {}",
+            row, col, self.name
+        )
+        .into())
     }
 
     /// Performs a horizontal lookup (HLOOKUP) on the table.
@@ -1164,18 +1395,35 @@ impl CodcelTable for ParquetTable {
     /// - The row index is out of bounds
     /// - The query execution fails
     #[allow(clippy::too_many_arguments)]
-    async fn h_lookup(&self, lookup_value: &str, row_index: i32, range: Option<bool>, table_functions: &TableFunctions, input: &Input, column: &str, value_format: &ValueFormat) -> Result<Value, Box<dyn Error + Send + Sync>> {
+    async fn h_lookup(
+        &self,
+        lookup_value: &str,
+        row_index: i32,
+        range: Option<bool>,
+        table_functions: &TableFunctions,
+        input: &Input,
+        column: &str,
+        value_format: &ValueFormat,
+    ) -> Result<Value, Box<dyn Error + Send + Sync>> {
         let range = range.unwrap_or_default();
 
-        let match_type = if range {
-            Some(1)
-        } else {
-            Some(0)
-        };
+        let match_type = if range { Some(1) } else { Some(0) };
 
-        if let Ok(value) = self.match_table(lookup_value, match_type, column, 1, value_format).await {
+        if let Ok(value) = self
+            .match_table(lookup_value, match_type, column, 1, value_format)
+            .await
+        {
             if let Ok(found_column) = value.i32(value_format) {
-                if let Ok(result) = self.index(row_index, Some(found_column), table_functions, input, value_format).await {
+                if let Ok(result) = self
+                    .index(
+                        row_index,
+                        Some(found_column),
+                        table_functions,
+                        input,
+                        value_format,
+                    )
+                    .await
+                {
                     return Ok(result);
                 }
             }
@@ -1184,7 +1432,11 @@ impl CodcelTable for ParquetTable {
         // TODO: PERHAPS DO NOT RAISE AN ERROR????
         // TODO, PERHAPS RAISE AN ERROR HERE
         //    Ok("".to_string())
-        Err(format!("HLOOKUP: Search value {lookup_value} does not exist at row {:} for table {}", row_index, self.name).into())
+        Err(format!(
+            "HLOOKUP: Search value {lookup_value} does not exist at row {:} for table {}",
+            row_index, self.name
+        )
+        .into())
     }
 
     /// Performs an advanced lookup (XLOOKUP) with flexible match and search modes.
@@ -1223,25 +1475,48 @@ impl CodcelTable for ParquetTable {
     ///
     /// Returns an error if no match is found and `if_not_found` is not provided.
     #[allow(clippy::too_many_arguments)]
-    async fn x_lookup(&self, lookup_value: &str, search_column: &str, columns: &str, row: u32, if_not_found: Option<String>, match_mode: Option<i32>, search_mode: Option<i32>, table_functions: &TableFunctions, input: &Input, value_format: &ValueFormat) -> Result<Value, Box<dyn Error + Send + Sync>> {
+    async fn x_lookup(
+        &self,
+        lookup_value: &str,
+        search_column: &str,
+        columns: &str,
+        row: u32,
+        if_not_found: Option<String>,
+        match_mode: Option<i32>,
+        search_mode: Option<i32>,
+        table_functions: &TableFunctions,
+        input: &Input,
+        value_format: &ValueFormat,
+    ) -> Result<Value, Box<dyn Error + Send + Sync>> {
         // Validate column identifiers - search_column may be a comma-separated list
         validate_column_list(columns)?;
         validate_column_list(search_column)?;
 
         if row == 0 {
             // VERTICAL SEARCH
-            let sql_query = self.x_search_query(lookup_value, search_column, columns, match_mode, search_mode, value_format)?;
+            let sql_query = self.x_search_query(
+                lookup_value,
+                search_column,
+                columns,
+                match_mode,
+                search_mode,
+                value_format,
+            )?;
 
             if !sql_query.is_empty() {
                 let single_response = !columns.contains(',');
                 if single_response {
                     let value_result = self.sql_query_response(&sql_query).await;
-                    if let Some(result) = process_result(value_result, table_functions, input, value_format).await {
+                    if let Some(result) =
+                        process_result(value_result, table_functions, input, value_format).await
+                    {
                         return Ok(result);
                     }
                 } else {
                     let value_result = self.sql_query_responses(&sql_query).await;
-                    if let Some(result) = process_results(value_result, table_functions, input, value_format).await {
+                    if let Some(result) =
+                        process_results(value_result, table_functions, input, value_format).await
+                    {
                         return Ok(result);
                     }
                 }
@@ -1250,17 +1525,31 @@ impl CodcelTable for ParquetTable {
             // HORIZONTAL SEARCH
             // row is a u32, so it's safe to use directly in the query
             let match_mode = match_mode.unwrap_or_default();
-            let match_value = search_value_pure(lookup_value, true, &value_format.decimal_separator);
-            let sql_query = format!("SELECT {search_column} FROM {} WHERE c0 = {:} LIMIT 1", self.name, row);
+            let match_value =
+                search_value_pure(lookup_value, true, &value_format.decimal_separator);
+            let sql_query = format!(
+                "SELECT {search_column} FROM {} WHERE c0 = {:} LIMIT 1",
+                self.name, row
+            );
             let value_result = self.sql_query_responses(&sql_query).await?;
-            if let Ok(Some(result)) = process_horizontal_match_results(&match_value, match_mode, search_mode, value_result) {
+            if let Ok(Some(result)) = process_horizontal_match_results(
+                &match_value,
+                match_mode,
+                search_mode,
+                value_result,
+            ) {
                 // result.i32() returns a validated integer, safe to use in query
                 let col_index = result.i32(value_format)?;
                 let col_name = format!("c{}", col_index);
                 validate_sql_identifier(&col_name)?;
-                let sql_query = format!("SELECT {} FROM {} WHERE c0 <> {:}", col_name, self.name, row);
+                let sql_query = format!(
+                    "SELECT {} FROM {} WHERE c0 <> {:}",
+                    col_name, self.name, row
+                );
                 let value_result = self.sql_query_responses(&sql_query).await;
-                if let Some(result) = process_results(value_result, table_functions, input, value_format).await {
+                if let Some(result) =
+                    process_results(value_result, table_functions, input, value_format).await
+                {
                     return Ok(result);
                 }
             }
@@ -1272,7 +1561,11 @@ impl CodcelTable for ParquetTable {
         if let Some(not_found) = if_not_found {
             Ok(Value::String(not_found))
         } else {
-            Err(format!("XSEARCH: Search value {lookup_value} does not exist for table {}", self.name).into())
+            Err(format!(
+                "XSEARCH: Search value {lookup_value} does not exist for table {}",
+                self.name
+            )
+            .into())
         }
     }
 
@@ -1300,9 +1593,30 @@ impl CodcelTable for ParquetTable {
     ///
     /// Returns an error if no match is found.
     #[allow(clippy::too_many_arguments)]
-    async fn lookup(&self, lookup_value: &str, search_column: &str, columns: &str, row: u32, table_functions: &TableFunctions, input: &Input, value_format: &ValueFormat) -> Result<Value, Box<dyn Error + Send + Sync>> {
+    async fn lookup(
+        &self,
+        lookup_value: &str,
+        search_column: &str,
+        columns: &str,
+        row: u32,
+        table_functions: &TableFunctions,
+        input: &Input,
+        value_format: &ValueFormat,
+    ) -> Result<Value, Box<dyn Error + Send + Sync>> {
         // We are using x_lookup for lookup
-        self.x_lookup(lookup_value, search_column, columns, row, None, Some(-1), None, table_functions, input, value_format).await
+        self.x_lookup(
+            lookup_value,
+            search_column,
+            columns,
+            row,
+            None,
+            Some(-1),
+            None,
+            table_functions,
+            input,
+            value_format,
+        )
+        .await
     }
 
     /// Finds the position of a value with advanced match and search modes (XMATCH function).
@@ -1336,13 +1650,28 @@ impl CodcelTable for ParquetTable {
     ///
     /// Returns an error if no match is found.
     #[allow(clippy::too_many_arguments)]
-    async fn x_match(&self, match_value: &str, match_mode: Option<i32>, search_mode: Option<i32>, column: &str, row: u32, value_format: &ValueFormat) -> Result<Value, Box<dyn Error + Send + Sync>> {
+    async fn x_match(
+        &self,
+        match_value: &str,
+        match_mode: Option<i32>,
+        search_mode: Option<i32>,
+        column: &str,
+        row: u32,
+        value_format: &ValueFormat,
+    ) -> Result<Value, Box<dyn Error + Send + Sync>> {
         // Validate column identifier - may be a comma-separated list
         validate_column_list(column)?;
 
         if row == 0 {
             // VERTICAL COLUMN SEARCH
-            let sql_query = self.x_search_query(match_value, column, "c0", match_mode, search_mode, value_format)?;
+            let sql_query = self.x_search_query(
+                match_value,
+                column,
+                "c0",
+                match_mode,
+                search_mode,
+                value_format,
+            )?;
 
             if !sql_query.is_empty() {
                 if let Ok(result) = self.sql_query_response(&sql_query).await {
@@ -1353,9 +1682,17 @@ impl CodcelTable for ParquetTable {
             // row is a u32, so it's safe to use directly in the query
             let match_mode = match_mode.unwrap_or_default();
             let match_value = search_value_pure(match_value, true, &value_format.decimal_separator);
-            let sql_query = format!("SELECT {column} FROM {} WHERE c0 = {:} LIMIT 1", self.name, row);
+            let sql_query = format!(
+                "SELECT {column} FROM {} WHERE c0 = {:} LIMIT 1",
+                self.name, row
+            );
             let value_result = self.sql_query_responses(&sql_query).await?;
-            if let Ok(Some(result)) = process_horizontal_match_results(&match_value, match_mode, search_mode, value_result) {
+            if let Ok(Some(result)) = process_horizontal_match_results(
+                &match_value,
+                match_mode,
+                search_mode,
+                value_result,
+            ) {
                 return Ok(result);
             }
         }
@@ -1363,7 +1700,11 @@ impl CodcelTable for ParquetTable {
         // TODO: PERHAPS DO NOT RAISE AN ERROR????
         // TODO, PERHAPS RAISE AN ERROR HERE
         //    Ok("".to_string())
-        Err(format!("XMATCH: Search value {match_value} does not exist for table {}", self.name).into())
+        Err(format!(
+            "XMATCH: Search value {match_value} does not exist for table {}",
+            self.name
+        )
+        .into())
     }
 
     /// Filters rows based on a condition (FILTER function).
@@ -1389,7 +1730,15 @@ impl CodcelTable for ParquetTable {
     ///
     /// Returns an error if column identifiers are invalid.
     #[allow(clippy::too_many_arguments)]
-    async fn filter(&self, condition: Condition, if_empty: &str, columns: &str, table_functions: &TableFunctions, input: &Input, value_format: &ValueFormat) -> Result<Value, Box<dyn Error + Send + Sync>> {
+    async fn filter(
+        &self,
+        condition: Condition,
+        if_empty: &str,
+        columns: &str,
+        table_functions: &TableFunctions,
+        input: &Input,
+        value_format: &ValueFormat,
+    ) -> Result<Value, Box<dyn Error + Send + Sync>> {
         // Validate column identifiers
         validate_column_list(columns)?;
 
@@ -1397,10 +1746,15 @@ impl CodcelTable for ParquetTable {
         // Note: condition.condition() should also perform validation/escaping internally
         let where_condition = condition.condition(abstract_column_types, value_format)?;
 
-        let sql_query = format!("SELECT {columns} FROM {} WHERE {where_condition}", self.name);
+        let sql_query = format!(
+            "SELECT {columns} FROM {} WHERE {where_condition}",
+            self.name
+        );
 
         let value_result = self.sql_query_area_responses(&sql_query).await;
-        if let Some(result) = process_area_results(value_result, table_functions, input, value_format).await {
+        if let Some(result) =
+            process_area_results(value_result, table_functions, input, value_format).await
+        {
             Ok(result)
         } else if if_empty.is_empty() {
             // TODO: CHECK IF WE SHOULD RAISE AN ERROR HERE INSTEAD???
@@ -1430,14 +1784,22 @@ impl CodcelTable for ParquetTable {
     /// Returns an error if:
     /// - Column identifiers are invalid
     /// - The table is empty
-    async fn select_all(&self, columns: &str, table_functions: &TableFunctions, input: &Input, value_format: &ValueFormat) -> Result<Value, Box<dyn Error + Send + Sync>> {
+    async fn select_all(
+        &self,
+        columns: &str,
+        table_functions: &TableFunctions,
+        input: &Input,
+        value_format: &ValueFormat,
+    ) -> Result<Value, Box<dyn Error + Send + Sync>> {
         // Validate column identifiers
         validate_column_list(columns)?;
 
         let sql_query = format!("SELECT {columns} FROM {}", self.name);
 
         let value_result = self.sql_query_area_responses(&sql_query).await;
-        if let Some(result) = process_area_results(value_result, table_functions, input, value_format).await {
+        if let Some(result) =
+            process_area_results(value_result, table_functions, input, value_format).await
+        {
             Ok(result)
         } else {
             Err("ALL: No values found".into())
@@ -1445,9 +1807,27 @@ impl CodcelTable for ParquetTable {
     }
 
     #[allow(clippy::too_many_arguments)]
-    async fn filter_with_modifiers(&self, condition: Condition, if_empty: &str, columns: &str, table_functions: &TableFunctions, input: &Input, value_format: &ValueFormat, modifiers: &SqlModifiers) -> Result<Value, Box<dyn Error + Send + Sync>> {
+    async fn filter_with_modifiers(
+        &self,
+        condition: Condition,
+        if_empty: &str,
+        columns: &str,
+        table_functions: &TableFunctions,
+        input: &Input,
+        value_format: &ValueFormat,
+        modifiers: &SqlModifiers,
+    ) -> Result<Value, Box<dyn Error + Send + Sync>> {
         if modifiers.is_empty() {
-            return self.filter(condition, if_empty, columns, table_functions, input, value_format).await;
+            return self
+                .filter(
+                    condition,
+                    if_empty,
+                    columns,
+                    table_functions,
+                    input,
+                    value_format,
+                )
+                .await;
         }
 
         validate_column_list(columns)?;
@@ -1455,8 +1835,13 @@ impl CodcelTable for ParquetTable {
         let abstract_column_types = self.get_abstract_column_types();
         let where_condition = condition.condition(abstract_column_types, value_format)?;
 
-        let col_list: Vec<String> = columns.split(',').map(|s| s.trim().to_string()).filter(|s| !s.is_empty()).collect();
-        let (select_prefix, order_clause, limit_clause) = build_parquet_modifier_clauses(modifiers, &col_list);
+        let col_list: Vec<String> = columns
+            .split(',')
+            .map(|s| s.trim().to_string())
+            .filter(|s| !s.is_empty())
+            .collect();
+        let (select_prefix, order_clause, limit_clause) =
+            build_parquet_modifier_clauses(modifiers, &col_list);
 
         // Aggregate query: returns a single scalar value
         if let Some(ref agg) = modifiers.aggregate {
@@ -1464,8 +1849,13 @@ impl CodcelTable for ParquetTable {
                 "COUNT(*)".to_string()
             } else {
                 // Filter to numeric columns only, matching Excel behavior of ignoring text
-                let numeric_cols: Vec<String> = col_list.iter()
-                    .filter(|col| abstract_column_types.get(*col).is_some_and(|ct| ct.is_numeric()))
+                let numeric_cols: Vec<String> = col_list
+                    .iter()
+                    .filter(|col| {
+                        abstract_column_types
+                            .get(*col)
+                            .is_some_and(|ct| ct.is_numeric())
+                    })
                     .cloned()
                     .collect();
                 if numeric_cols.is_empty() {
@@ -1479,7 +1869,9 @@ impl CodcelTable for ParquetTable {
                 "SELECT {} FROM {} WHERE {}",
                 select_expr, self.name, where_condition
             );
-            let batches = self.sql_query_name_area_responses(&self.name, &self.filename, &sql_query).await?;
+            let batches = self
+                .sql_query_name_area_responses(&self.name, &self.filename, &sql_query)
+                .await?;
             // Aggregate returns a single row with single column
             if let Some(first_row) = batches.first() {
                 if let Some(val) = first_row.first() {
@@ -1496,7 +1888,9 @@ impl CodcelTable for ParquetTable {
         );
 
         let value_result = self.sql_query_area_responses(&sql_query).await;
-        if let Some(result) = process_area_results(value_result, table_functions, input, value_format).await {
+        if let Some(result) =
+            process_area_results(value_result, table_functions, input, value_format).await
+        {
             Ok(result)
         } else if if_empty.is_empty() {
             Ok(Value::String("#CALC!".to_string()))
@@ -1505,15 +1899,29 @@ impl CodcelTable for ParquetTable {
         }
     }
 
-    async fn select_all_with_modifiers(&self, columns: &str, table_functions: &TableFunctions, input: &Input, value_format: &ValueFormat, modifiers: &SqlModifiers) -> Result<Value, Box<dyn Error + Send + Sync>> {
+    async fn select_all_with_modifiers(
+        &self,
+        columns: &str,
+        table_functions: &TableFunctions,
+        input: &Input,
+        value_format: &ValueFormat,
+        modifiers: &SqlModifiers,
+    ) -> Result<Value, Box<dyn Error + Send + Sync>> {
         if modifiers.is_empty() {
-            return self.select_all(columns, table_functions, input, value_format).await;
+            return self
+                .select_all(columns, table_functions, input, value_format)
+                .await;
         }
 
         validate_column_list(columns)?;
 
-        let col_list: Vec<String> = columns.split(',').map(|s| s.trim().to_string()).filter(|s| !s.is_empty()).collect();
-        let (select_prefix, order_clause, limit_clause) = build_parquet_modifier_clauses(modifiers, &col_list);
+        let col_list: Vec<String> = columns
+            .split(',')
+            .map(|s| s.trim().to_string())
+            .filter(|s| !s.is_empty())
+            .collect();
+        let (select_prefix, order_clause, limit_clause) =
+            build_parquet_modifier_clauses(modifiers, &col_list);
 
         // Aggregate query
         if let Some(ref agg) = modifiers.aggregate {
@@ -1521,8 +1929,13 @@ impl CodcelTable for ParquetTable {
                 "COUNT(*)".to_string()
             } else {
                 let abstract_column_types = self.get_abstract_column_types();
-                let numeric_cols: Vec<String> = col_list.iter()
-                    .filter(|col| abstract_column_types.get(*col).is_some_and(|ct| ct.is_numeric()))
+                let numeric_cols: Vec<String> = col_list
+                    .iter()
+                    .filter(|col| {
+                        abstract_column_types
+                            .get(*col)
+                            .is_some_and(|ct| ct.is_numeric())
+                    })
                     .cloned()
                     .collect();
                 if numeric_cols.is_empty() {
@@ -1531,11 +1944,10 @@ impl CodcelTable for ParquetTable {
                     agg.build_aggregate_select(&numeric_cols)
                 }
             };
-            let sql_query = format!(
-                "SELECT {} FROM {}",
-                select_expr, self.name
-            );
-            let batches = self.sql_query_name_area_responses(&self.name, &self.filename, &sql_query).await?;
+            let sql_query = format!("SELECT {} FROM {}", select_expr, self.name);
+            let batches = self
+                .sql_query_name_area_responses(&self.name, &self.filename, &sql_query)
+                .await?;
             if let Some(first_row) = batches.first() {
                 if let Some(val) = first_row.first() {
                     return Ok(val.clone());
@@ -1550,7 +1962,9 @@ impl CodcelTable for ParquetTable {
         );
 
         let value_result = self.sql_query_area_responses(&sql_query).await;
-        if let Some(result) = process_area_results(value_result, table_functions, input, value_format).await {
+        if let Some(result) =
+            process_area_results(value_result, table_functions, input, value_format).await
+        {
             Ok(result)
         } else {
             Err("ALL: No values found".into())
@@ -1558,13 +1972,51 @@ impl CodcelTable for ParquetTable {
     }
 
     #[allow(clippy::too_many_arguments)]
-    async fn x_lookup_with_modifiers(&self, lookup_value: &str, search_column: &str, columns: &str, row: u32, if_not_found: Option<String>, match_mode: Option<i32>, search_mode: Option<i32>, table_functions: &TableFunctions, input: &Input, value_format: &ValueFormat, modifiers: &SqlModifiers) -> Result<Value, Box<dyn Error + Send + Sync>> {
+    async fn x_lookup_with_modifiers(
+        &self,
+        lookup_value: &str,
+        search_column: &str,
+        columns: &str,
+        row: u32,
+        if_not_found: Option<String>,
+        match_mode: Option<i32>,
+        search_mode: Option<i32>,
+        table_functions: &TableFunctions,
+        input: &Input,
+        value_format: &ValueFormat,
+        modifiers: &SqlModifiers,
+    ) -> Result<Value, Box<dyn Error + Send + Sync>> {
         if modifiers.is_empty() {
-            return self.x_lookup(lookup_value, search_column, columns, row, if_not_found, match_mode, search_mode, table_functions, input, value_format).await;
+            return self
+                .x_lookup(
+                    lookup_value,
+                    search_column,
+                    columns,
+                    row,
+                    if_not_found,
+                    match_mode,
+                    search_mode,
+                    table_functions,
+                    input,
+                    value_format,
+                )
+                .await;
         }
 
         // For x_lookup with modifiers, delegate to base for now
-        self.x_lookup(lookup_value, search_column, columns, row, if_not_found, match_mode, search_mode, table_functions, input, value_format).await
+        self.x_lookup(
+            lookup_value,
+            search_column,
+            columns,
+            row,
+            if_not_found,
+            match_mode,
+            search_mode,
+            table_functions,
+            input,
+            value_format,
+        )
+        .await
     }
 
     /// Adds a new row to the table.
@@ -1574,7 +2026,13 @@ impl CodcelTable for ParquetTable {
     /// # Errors
     ///
     /// Always returns an error indicating the operation is not supported.
-    async fn add_row(&self, _values: Vec<Value>, _table_functions: &TableFunctions, _input: &Input, _value_format: &ValueFormat) -> Result<Value, Box<dyn Error + Send + Sync>> {
+    async fn add_row(
+        &self,
+        _values: Vec<Value>,
+        _table_functions: &TableFunctions,
+        _input: &Input,
+        _value_format: &ValueFormat,
+    ) -> Result<Value, Box<dyn Error + Send + Sync>> {
         Err("ADDROW: Not implemented for read only tables".into())
     }
 
@@ -1585,7 +2043,14 @@ impl CodcelTable for ParquetTable {
     /// # Errors
     ///
     /// Always returns an error indicating the operation is not supported.
-    async fn update_row(&self, _id: &str, _values: Vec<Value>, _table_functions: &TableFunctions, _input: &Input, _value_format: &ValueFormat) -> Result<Value, Box<dyn Error + Send + Sync>> {
+    async fn update_row(
+        &self,
+        _id: &str,
+        _values: Vec<Value>,
+        _table_functions: &TableFunctions,
+        _input: &Input,
+        _value_format: &ValueFormat,
+    ) -> Result<Value, Box<dyn Error + Send + Sync>> {
         Err("UPDATEROW: Not implemented for read only tables".into())
     }
 
@@ -1596,7 +2061,13 @@ impl CodcelTable for ParquetTable {
     /// # Errors
     ///
     /// Always returns an error indicating the operation is not supported.
-    async fn delete_row(&self, _id: &str, _table_functions: &TableFunctions, _input: &Input, _value_format: &ValueFormat) -> Result<Value, Box<dyn Error + Send + Sync>> {
+    async fn delete_row(
+        &self,
+        _id: &str,
+        _table_functions: &TableFunctions,
+        _input: &Input,
+        _value_format: &ValueFormat,
+    ) -> Result<Value, Box<dyn Error + Send + Sync>> {
         Err("DELETEROW: Not implemented for read only tables".into())
     }
 
@@ -1607,7 +2078,13 @@ impl CodcelTable for ParquetTable {
     /// # Errors
     ///
     /// Always returns an error indicating the operation is not supported.
-    async fn read_row(&self, _id: &str, _table_functions: &TableFunctions, _input: &Input, _value_format: &ValueFormat) -> Result<Value, Box<dyn Error + Send + Sync>> {
+    async fn read_row(
+        &self,
+        _id: &str,
+        _table_functions: &TableFunctions,
+        _input: &Input,
+        _value_format: &ValueFormat,
+    ) -> Result<Value, Box<dyn Error + Send + Sync>> {
         Err("READROW: Not implemented for read only tables".into())
     }
 }

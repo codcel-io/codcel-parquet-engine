@@ -4,13 +4,13 @@
 // This file is part of Codcel (https://codcel.io).
 // See LICENSE-MIT and LICENSE-APACHE in the project root.
 
-use datafusion::prelude::*;
 use datafusion::arrow::record_batch::RecordBatch;
+use datafusion::prelude::*;
 use log::error;
 use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
-use tokio::sync::{RwLock, Mutex, broadcast};
+use tokio::sync::{broadcast, Mutex, RwLock};
 use tokio::time;
 
 /// Result type for query execution that can be shared across waiters
@@ -210,7 +210,9 @@ impl SqlCache {
         }
 
         // Phase 2: Execute query as leader
-        let result = self.execute_query_as_leader(name, filename, sql_query).await;
+        let result = self
+            .execute_query_as_leader(name, filename, sql_query)
+            .await;
 
         // Phase 3: Broadcast result and cleanup
         self.complete_in_flight(sql_query, &result).await;
@@ -252,10 +254,13 @@ impl SqlCache {
         // Create broadcast channel with capacity 16 to handle late subscribers
         let (sender, _) = broadcast::channel(16);
 
-        in_flight.insert(sql_query.to_string(), InFlightQuery {
-            sender,
-            started_at: Instant::now(),
-        });
+        in_flight.insert(
+            sql_query.to_string(),
+            InFlightQuery {
+                sender,
+                started_at: Instant::now(),
+            },
+        );
 
         QueryRole::Leader
     }
@@ -267,10 +272,7 @@ impl SqlCache {
         sql_query: &str,
     ) -> Result<Option<Arc<Vec<RecordBatch>>>, Box<dyn std::error::Error + Send + Sync>> {
         // Wait with timeout
-        let result = tokio::time::timeout(
-            self.in_flight_timeout,
-            receiver.recv()
-        ).await;
+        let result = tokio::time::timeout(self.in_flight_timeout, receiver.recv()).await;
 
         match result {
             Ok(Ok(query_result)) => {
@@ -326,7 +328,10 @@ impl SqlCache {
                 // Double-check with write lock to avoid race condition
                 let mut tables = self.registered_tables.write().await;
                 if !tables.contains(name) {
-                    if let Err(e) = ctx_guard.register_parquet(name, filename, ParquetReadOptions::default()).await {
+                    if let Err(e) = ctx_guard
+                        .register_parquet(name, filename, ParquetReadOptions::default())
+                        .await
+                    {
                         return Err(QueryError::RegistrationError(e.to_string()));
                     }
                     tables.insert(name.to_string());
@@ -429,9 +434,8 @@ impl SqlCache {
                 // Clean up stale in-flight entries (queries that took too long)
                 {
                     let mut in_flight_guard = in_flight.write().await;
-                    in_flight_guard.retain(|_, flight| {
-                        flight.started_at.elapsed() < in_flight_timeout * 3
-                    });
+                    in_flight_guard
+                        .retain(|_, flight| flight.started_at.elapsed() < in_flight_timeout * 3);
                 }
             }
         });
