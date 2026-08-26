@@ -4,6 +4,14 @@
 // This file is part of Codcel (https://codcel.io).
 // See LICENSE-MIT and LICENSE-APACHE in the project root.
 
+#![allow(
+    clippy::unwrap_used,
+    clippy::expect_used,
+    clippy::panic,
+    reason = "integration-test scaffolding: clippy's allow-*-in-tests keys do not reach \
+              the plain helper functions an integration test target is built from"
+)]
+
 //! Behavioural snapshot suite for `ParquetTable`.
 //!
 //! Generates deterministic Parquet fixtures into `CARGO_TARGET_TMPDIR`, exercises the

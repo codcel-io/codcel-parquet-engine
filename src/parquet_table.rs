@@ -29,8 +29,6 @@ use datafusion::arrow::array::{
 use datafusion::arrow::record_batch::RecordBatch;
 use datafusion::parquet::basic::LogicalType;
 use datafusion::parquet::file::reader::{FileReader, SerializedFileReader};
-use once_cell::sync::Lazy;
-use regex::Regex;
 use std::collections::HashMap;
 use std::error::Error;
 use std::fs::File;
@@ -39,9 +37,16 @@ use std::sync::Arc;
 use std::sync::OnceLock;
 use tokio::sync::RwLock;
 
-/// Regex pattern for valid SQL identifiers: alphanumeric and underscores only, must start with letter or underscore
-static IDENTIFIER_REGEX: Lazy<Regex> =
-    Lazy::new(|| Regex::new(r"^[a-zA-Z_][a-zA-Z0-9_]*$").expect("Invalid regex pattern"));
+/// Matches `^[a-zA-Z_][a-zA-Z0-9_]*$` without a regex, so there is no fallible
+/// initialisation to unwrap in a `static`.
+fn is_sql_identifier(identifier: &str) -> bool {
+    let mut chars = identifier.chars();
+    match chars.next() {
+        Some(first) if first.is_ascii_alphabetic() || first == '_' => {}
+        _ => return false,
+    }
+    chars.all(|c| c.is_ascii_alphanumeric() || c == '_')
+}
 
 /// Validates that a string is a safe SQL identifier (column name, table name, etc.)
 /// Returns Ok(()) if valid, Err with message if invalid.
@@ -51,7 +56,7 @@ fn validate_sql_identifier(identifier: &str) -> Result<(), Box<dyn Error + Send 
     if identifier.is_empty() {
         return Err("SQL identifier cannot be empty".into());
     }
-    if !IDENTIFIER_REGEX.is_match(identifier) {
+    if !is_sql_identifier(identifier) {
         return Err(format!("Invalid SQL identifier: '{}'. Identifiers must contain only alphanumeric characters and underscores, and start with a letter or underscore.", identifier).into());
     }
     Ok(())
@@ -704,7 +709,7 @@ impl ParquetTable {
                 // Parameterized table function: *P*template_name:const1:const2:...
                 if let Some(ref param_map) = table_functions.param_functions {
                     let mut parts = stripped.splitn(2, ':');
-                    let template_name = parts.next().unwrap();
+                    let template_name = parts.next().unwrap_or("");
                     let constants_str = parts.next().unwrap_or("");
                     let params: Vec<Value> = constants_str
                         .split(':')

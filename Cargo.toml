@@ -13,6 +13,7 @@ keywords = ["excel", "spreadsheet", "parquet", "datafusion", "analytics"]
 categories = ["database-implementations", "database", "caching"]
 include = [
     "src/**/*.rs",
+    "clippy.toml",
     "tests/**/*.rs",
     "README.md",
     "CONTRIBUTING.md",
@@ -36,3 +37,8 @@ once_cell = "1.21.4"
 
 [dev-dependencies]
 tokio = { version = "1.53.1", features = ["macros", "rt-multi-thread"] }
+
+[lints.clippy]
+unwrap_used = "deny"
+expect_used = "deny"
+panic = "deny"
