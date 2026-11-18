@@ -5,6 +5,8 @@
 // See LICENSE-MIT and LICENSE-APACHE in the project root.
 
 use datafusion::arrow::record_batch::RecordBatch;
+use datafusion::datasource::MemTable;
+use datafusion::parquet::file::reader::{FileReader, SerializedFileReader};
 use datafusion::prelude::*;
 use log::error;
 use std::collections::{HashMap, HashSet};
@@ -67,6 +69,77 @@ impl std::fmt::Display for QueryError {
 }
 
 impl std::error::Error for QueryError {}
+
+/// Tables up to this many bytes, uncompressed, are read into memory once. Set
+/// `CODCEL_PARQUET_MEMORY_MAX_BYTES` to change it, or to `0` to query every table from its files.
+const DEFAULT_MEMORY_MAX_BYTES: u64 = 64 * 1024 * 1024;
+
+fn memory_max_bytes() -> u64 {
+    static MAX: std::sync::OnceLock<u64> = std::sync::OnceLock::new();
+    *MAX.get_or_init(|| {
+        std::env::var("CODCEL_PARQUET_MEMORY_MAX_BYTES")
+            .ok()
+            .and_then(|v| v.trim().parse().ok())
+            .unwrap_or(DEFAULT_MEMORY_MAX_BYTES)
+    })
+}
+
+/// The uncompressed size of the table in the files matching `filename` (`..._xyz*.parquet`,
+/// one file per shard, numbered from 0), or `None` if a file cannot be read.
+fn uncompressed_bytes(filename: &str) -> Option<u64> {
+    let mut total: u64 = 0;
+    for index in 0.. {
+        let shard = filename.replace("_xyz*.parquet", &format!("_xyz{index}.parquet"));
+        if shard == filename && index > 0 {
+            break;
+        }
+        let Ok(file) = std::fs::File::open(&shard) else {
+            if index == 0 {
+                return None;
+            }
+            break;
+        };
+        let reader = SerializedFileReader::new(file).ok()?;
+        for row_group in reader.metadata().row_groups() {
+            total += u64::try_from(row_group.total_byte_size()).unwrap_or(u64::MAX);
+        }
+        if shard == filename {
+            break;
+        }
+    }
+    Some(total)
+}
+
+/// Registers the table `name`. A table small enough is read into memory once: every query would
+/// otherwise list, open and decode its files again. Its rows keep their order in the files, so
+/// a query returns the same rows from it as from the files. Larger tables are queried from their
+/// files.
+async fn register_table(
+    ctx: &SessionContext,
+    name: &str,
+    filename: &str,
+) -> datafusion::error::Result<()> {
+    let max = memory_max_bytes();
+    if max > 0 && uncompressed_bytes(filename).is_some_and(|bytes| bytes <= max) {
+        let frame = ctx
+            .read_parquet(filename, ParquetReadOptions::default())
+            .await?;
+        let schema = frame.schema().inner().clone();
+        // Partition by partition, in order, rather than interleaved.
+        let batches: Vec<RecordBatch> = frame
+            .collect_partitioned()
+            .await?
+            .into_iter()
+            .flatten()
+            .collect();
+        let table = MemTable::try_new(schema, vec![batches])?;
+        ctx.register_table(name, Arc::new(table))?;
+        crate::profile::add(&crate::profile::MEMORY_TABLES, 1);
+        return Ok(());
+    }
+    ctx.register_parquet(name, filename, ParquetReadOptions::default())
+        .await
+}
 
 struct CacheEntry {
     result: Arc<Vec<RecordBatch>>,
@@ -194,11 +267,14 @@ impl SqlCache {
         filename: &str,
         sql_query: &str,
     ) -> Result<Option<Arc<Vec<RecordBatch>>>, Box<dyn std::error::Error + Send + Sync>> {
+        crate::profile::add(&crate::profile::SQL_QUERIES, 1);
+
         // Phase 1: Determine role (cache hit, leader, or follower)
         let role = self.determine_query_role(sql_query).await;
 
         match role {
             QueryRole::CacheHit(result) => {
+                crate::profile::add(&crate::profile::SQL_CACHE_HITS, 1);
                 return Ok(Some(result));
             }
             QueryRole::Follower(receiver) => {
@@ -210,9 +286,14 @@ impl SqlCache {
         }
 
         // Phase 2: Execute query as leader
+        let started = Instant::now();
         let result = self
             .execute_query_as_leader(name, filename, sql_query)
             .await;
+        crate::profile::add(
+            &crate::profile::SQL_EXEC_NANOS,
+            started.elapsed().as_nanos() as u64,
+        );
 
         // Phase 3: Broadcast result and cleanup
         self.complete_in_flight(sql_query, &result).await;
@@ -328,10 +409,7 @@ impl SqlCache {
                 // Double-check with write lock to avoid race condition
                 let mut tables = self.registered_tables.write().await;
                 if !tables.contains(name) {
-                    if let Err(e) = ctx_guard
-                        .register_parquet(name, filename, ParquetReadOptions::default())
-                        .await
-                    {
+                    if let Err(e) = register_table(&ctx_guard, name, filename).await {
                         return Err(QueryError::RegistrationError(e.to_string()));
                     }
                     tables.insert(name.to_string());

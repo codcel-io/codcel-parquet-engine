@@ -726,7 +726,11 @@ impl ParquetTable {
                         })
                         .collect();
                     if let Some(fun) = param_map.get(template_name) {
-                        if let Ok(result) = fun(Arc::new(input.clone()), params).await {
+                        // The same request: share what it has computed, or the function
+                        // would compute every cell it reads again.
+                        if let Ok(result) =
+                            fun(Arc::new(input.clone_sharing_caches()), params).await
+                        {
                             return Ok(result);
                         }
                     }
@@ -734,8 +738,7 @@ impl ParquetTable {
             } else if let Some(stripped) = val.strip_prefix("*F*") {
                 if let Some(ref table_functions_map) = table_functions.functions {
                     if let Some(fun) = table_functions_map.get(stripped) {
-                        // TODO: Potential performance problem (Arc::new(input.clone()))
-                        if let Ok(result) = fun(Arc::new(input.clone())).await {
+                        if let Ok(result) = fun(Arc::new(input.clone_sharing_caches())).await {
                             return Ok(result);
                         }
                     }

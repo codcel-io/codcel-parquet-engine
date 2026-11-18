@@ -25,6 +25,7 @@
 //! - [`parquet_table::RowColumnValues`]: Type alias for 2D result sets (rows of column values)
 
 pub mod parquet_table;
+pub mod profile;
 mod sql_cache;
 
 pub use parquet_table::ParquetTable;
